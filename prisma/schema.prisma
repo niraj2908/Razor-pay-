@@ -1,0 +1,435 @@
+// Revenue Recovery Intelligence — Domain Schema
+// Implements the 18 entities listed in Section 24 of the master specification.
+// Layering follows Section 25 (Intelligence / Policy / Execution):
+//   Intelligence -> ModelPrediction
+//   Policy       -> RevenueRiskEvent, CandidateAction, Decision, DecisionEvidence, MerchantPolicy
+//   Execution    -> Execution, Outcome
+// Everything else (Merchant/Customer/Order/Payment/PaymentEvent) is shared reference data.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// Raw Razorpay-side payment lifecycle (Section 4/6: what Razorpay itself reports).
+enum RazorpayPaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+// Our internal diagnosis of a revenue-risk event (Section 6, "Diagnose").
+// Deliberately matches the exact categories named in the spec — nothing added.
+enum RiskDiagnosis {
+  CONFIRMED_FAILURE
+  PENDING
+  STATE_UNCERTAIN
+  CUSTOMER_ABANDONMENT
+  NETWORK_DEGRADATION
+  OTHER_RECOVERABLE
+}
+
+// The four core decisions (Section 8) — exact.
+enum RecoveryDecision {
+  ACT
+  WAIT
+  STOP
+  ESCALATE
+}
+
+// Named actions referenced throughout the spec (Section 32 UI signature,
+// Section 6 "Execute"). Kept as a closed enum so the policy engine can never
+// select an action that isn't a real, reviewed capability (Section 7 of the
+// dev rules: "we won't let the model choose illegal actions").
+enum ActionType {
+  NONE
+  RETRY_NOW
+  RETRY_LATER
+  PAYMENT_LINK
+  PAYMENT_METHOD_CHANGE
+  CUSTOMER_CONTACT
+  HUMAN_ESCALATION
+  STOP_RECOVERY
+}
+
+enum ExperimentGroup {
+  CONTROL
+  TREATMENT
+}
+
+enum ExecutionStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+// Section 18: every row that could be real-or-simulated must be able to say which.
+enum DataSource {
+  REAL_RAZORPAY_TEST_MODE
+  SIMULATED
+}
+
+enum ActorType {
+  SYSTEM
+  LLM
+  HUMAN
+}
+
+// ---------------------------------------------------------------------------
+// Reference data
+// ---------------------------------------------------------------------------
+
+model Merchant {
+  id                String   @id @default(cuid())
+  name              String
+  razorpayAccountId String?  @unique
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  customers        Customer[]
+  orders           Order[]
+  payments         Payment[]
+  revenueRiskEvents RevenueRiskEvent[]
+  policies         MerchantPolicy[]
+  networkEvents    NetworkEvent[]
+  auditEvents      AuditEvent[]
+
+  @@map("merchants")
+}
+
+model Customer {
+  id                  String   @id @default(cuid())
+  merchantId          String
+  razorpayCustomerId  String?
+  email               String?
+  phone               String?
+  createdAt           DateTime @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  orders   Order[]
+  payments Payment[]
+
+  @@unique([merchantId, razorpayCustomerId])
+  @@index([merchantId])
+  @@map("customers")
+}
+
+model Order {
+  id             String   @id @default(cuid())
+  merchantId     String
+  customerId     String?
+  razorpayOrderId String  @unique
+  amount         Int      // paise — never store money as float
+  currency       String   @default("INR")
+  status         String
+  createdAt      DateTime @default(now())
+
+  merchant Merchant  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  payments Payment[]
+
+  @@index([merchantId])
+  @@map("orders")
+}
+
+model Payment {
+  id                String                @id @default(cuid())
+  merchantId        String
+  orderId           String?
+  customerId        String?
+  razorpayPaymentId String?               @unique
+  amount            Int                   // paise
+  currency          String                @default("INR")
+  method            String?
+  status            RazorpayPaymentStatus @default(CREATED)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  merchant          Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  order             Order?             @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  customer          Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  paymentEvents     PaymentEvent[]
+  revenueRiskEvents RevenueRiskEvent[]
+  executions        Execution[]
+
+  @@index([merchantId])
+  @@index([status])
+  @@map("payments")
+}
+
+// Raw webhook log — Section 27/28: idempotency is enforced at this table via
+// the unique constraint on razorpayEventId. Nothing downstream re-processes
+// an event whose id has already landed here.
+model PaymentEvent {
+  id              String    @id @default(cuid())
+  paymentId       String?
+  razorpayEventId String    @unique
+  eventType       String    // e.g. "payment.failed", "payment.captured"
+  payload         Json
+  receivedAt      DateTime  @default(now())
+  processedAt     DateTime?
+
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([eventType])
+  @@index([receivedAt])
+  @@map("payment_events")
+}
+
+// ---------------------------------------------------------------------------
+// Policy layer — the core unit of intelligence (Section 7)
+// ---------------------------------------------------------------------------
+
+model RevenueRiskEvent {
+  id                        String        @id @default(cuid())
+  merchantId                String
+  paymentId                 String
+  diagnosis                 RiskDiagnosis
+  amountAtRisk              Int           // paise
+  naturalRecoveryProbability Float?       // Model A output, nullable until scored
+  detectedAt                DateTime      @default(now())
+  resolvedAt                DateTime?
+  dataSource                DataSource    @default(SIMULATED)
+
+  merchant          Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  payment           Payment            @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  candidateActions  CandidateAction[]
+  decisions         Decision[]
+  outcomes          Outcome[]
+  modelPredictions  ModelPrediction[]
+  experimentAssignment ExperimentAssignment?
+
+  @@index([merchantId])
+  @@index([diagnosis])
+  @@index([resolvedAt])
+  @@map("revenue_risk_events")
+}
+
+// The generated action set for a given risk event (Section 6 "Predict" / "Decide").
+model CandidateAction {
+  id                          String     @id @default(cuid())
+  revenueRiskEventId          String
+  actionType                  ActionType
+  predictedSuccessProbability Float
+  incrementalLift             Float      // predictedSuccessProbability - naturalRecoveryProbability
+  estimatedCost               Float      @default(0)
+  expectedNetValue            Float
+  createdAt                   DateTime   @default(now())
+
+  revenueRiskEvent RevenueRiskEvent @relation(fields: [revenueRiskEventId], references: [id], onDelete: Cascade)
+  chosenByDecisions Decision[]
+
+  @@index([revenueRiskEventId])
+  @@map("candidate_actions")
+}
+
+model Decision {
+  id                      String           @id @default(cuid())
+  revenueRiskEventId      String
+  decisionType             RecoveryDecision
+  chosenActionId           String?
+  expectedIncrementalValue Float?
+  decidedAt                DateTime         @default(now())
+
+  revenueRiskEvent RevenueRiskEvent @relation(fields: [revenueRiskEventId], references: [id], onDelete: Cascade)
+  chosenAction     CandidateAction? @relation(fields: [chosenActionId], references: [id], onDelete: SetNull)
+  evidence         DecisionEvidence[]
+  executions       Execution[]
+
+  @@index([revenueRiskEventId])
+  @@index([decisionType])
+  @@map("decisions")
+}
+
+// The "WHY" panel from Section 32 — every check/probability that fed the decision,
+// stored explicitly so the decision is inspectable, not magical.
+model DecisionEvidence {
+  id           String   @id @default(cuid())
+  decisionId   String
+  evidenceType String   // e.g. "natural_recovery_probability", "safety_check", "policy_check"
+  label        String   // e.g. "Payment state confirmed"
+  value        String?  // stringified probability/amount where applicable
+  passed       Boolean? // for safety/policy checks specifically; null for informational rows
+  createdAt    DateTime @default(now())
+
+  decision Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@index([decisionId])
+  @@map("decision_evidence")
+}
+
+model MerchantPolicy {
+  id         String   @id @default(cuid())
+  merchantId String
+  ruleType   String   // e.g. "max_action_amount", "no_auto_payment_link_above"
+  config     Json
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId])
+  @@map("merchant_policies")
+}
+
+// ---------------------------------------------------------------------------
+// Execution layer
+// ---------------------------------------------------------------------------
+
+model Execution {
+  id                  String          @id @default(cuid())
+  decisionId          String
+  paymentId           String
+  actionType          ActionType
+  razorpayReferenceId String?         // e.g. Payment Link id
+  status              ExecutionStatus @default(PENDING)
+  executedAt          DateTime        @default(now())
+  completedAt         DateTime?
+
+  decision Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  payment  Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([decisionId])
+  @@index([status])
+  @@map("executions")
+}
+
+model Outcome {
+  id                    String   @id @default(cuid())
+  revenueRiskEventId    String
+  recovered             Boolean
+  recoveredAmount       Int?     // paise
+  attributedIncremental Boolean? // null until the experiment/attribution layer scores it
+  observedAt            DateTime @default(now())
+
+  revenueRiskEvent RevenueRiskEvent @relation(fields: [revenueRiskEventId], references: [id], onDelete: Cascade)
+
+  @@index([revenueRiskEventId])
+  @@map("outcomes")
+}
+
+// ---------------------------------------------------------------------------
+// Experimentation (Section 12/16-19 of the original brainstorm — the
+// counterfactual proof engine behind Proof 1 in Section 44)
+// ---------------------------------------------------------------------------
+
+model Experiment {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
+  status      String    @default("RUNNING")
+
+  assignments ExperimentAssignment[]
+  results     ExperimentResult[]
+
+  @@map("experiments")
+}
+
+model ExperimentAssignment {
+  id                 String          @id @default(cuid())
+  experimentId       String
+  revenueRiskEventId String          @unique
+  group              ExperimentGroup
+  assignedAt         DateTime        @default(now())
+
+  experiment       Experiment       @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  revenueRiskEvent RevenueRiskEvent @relation(fields: [revenueRiskEventId], references: [id], onDelete: Cascade)
+
+  @@index([experimentId])
+  @@map("experiment_assignments")
+}
+
+// Aggregated per-group rollup. The incremental GMV number itself (Section 44,
+// Proof 1) is a derived comparison across two rows here, computed in the
+// reporting layer — not double-stored.
+model ExperimentResult {
+  id               String          @id @default(cuid())
+  experimentId     String
+  group            ExperimentGroup
+  populationCount  Int
+  totalAtRiskAmount Int            // paise
+  totalRecoveredAmount Int         // paise
+  interventionCount Int            @default(0)
+  computedAt       DateTime        @default(now())
+
+  experiment Experiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+
+  @@unique([experimentId, group])
+  @@map("experiment_results")
+}
+
+// ---------------------------------------------------------------------------
+// Network intelligence (Section 7 "timing-sensitive", Section 26 diagram)
+// ---------------------------------------------------------------------------
+
+model NetworkEvent {
+  id         String     @id @default(cuid())
+  merchantId String?
+  instrument String     // e.g. "UPI-HDFC", "card-network-visa"
+  severity   String
+  startedAt  DateTime
+  endedAt    DateTime?
+  source     DataSource @default(SIMULATED)
+  createdAt  DateTime   @default(now())
+
+  merchant Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+
+  @@index([instrument])
+  @@index([startedAt])
+  @@map("network_events")
+}
+
+// ---------------------------------------------------------------------------
+// Intelligence layer logging (Section 24: model_predictions — reproducibility)
+// ---------------------------------------------------------------------------
+
+model ModelPrediction {
+  id                  String   @id @default(cuid())
+  revenueRiskEventId  String
+  modelName           String   // e.g. "natural_recovery_v1"
+  modelVersion        String
+  predictedValue      Float
+  inputFeatures       Json?
+  predictedAt         DateTime @default(now())
+
+  revenueRiskEvent RevenueRiskEvent @relation(fields: [revenueRiskEventId], references: [id], onDelete: Cascade)
+
+  @@index([revenueRiskEventId])
+  @@index([modelName, modelVersion])
+  @@map("model_predictions")
+}
+
+// ---------------------------------------------------------------------------
+// Audit (Section 24, Section 31 screen 6 — full action timeline)
+// ---------------------------------------------------------------------------
+
+model AuditEvent {
+  id         String    @id @default(cuid())
+  merchantId String?
+  entityType String    // e.g. "Decision", "Execution", "MerchantPolicy"
+  entityId   String
+  action     String    // e.g. "decision.act", "policy.updated"
+  actorType  ActorType @default(SYSTEM)
+  details    Json?
+  createdAt  DateTime  @default(now())
+
+  merchant Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_events")
+}
