@@ -61,6 +61,10 @@ enum ActionType {
   CUSTOMER_CONTACT
   HUMAN_ESCALATION
   STOP_RECOVERY
+  // Phase 22 Step 3: capturing an authorized-but-uncaptured payment is a
+  // distinct action from retrying a failed one - added instead of the
+  // RETRY_NOW placeholder executionService.ts previously used for it.
+  CAPTURE
 }
 
 enum ExperimentGroup {
@@ -72,6 +76,12 @@ enum ExecutionStatus {
   PENDING
   SUCCEEDED
   FAILED
+  // Phase 22 Step 3: a network timeout or unparseable response after an
+  // external Razorpay call is NOT proof the operation failed - the request
+  // may have gone through. AMBIGUOUS is a distinct terminal-for-now state:
+  // never auto-retried, always routed to reconciliation/escalation. See
+  // docs/decision-engine.md.
+  AMBIGUOUS
 }
 
 // Section 18: every row that could be real-or-simulated must be able to say which.
@@ -288,9 +298,14 @@ model MerchantPolicy {
 // Execution layer
 // ---------------------------------------------------------------------------
 
+// Execution.decisionId is @unique (Phase 22 Step 2): at most one Execution
+// per Decision row, enforced at the database level so that two concurrent
+// "execute this decision" requests can never create two Execution rows -
+// the second insert fails with P2002, exactly like PaymentEvent's
+// razorpayEventId idempotency (see webhooks/idempotency.ts).
 model Execution {
   id                  String          @id @default(cuid())
-  decisionId          String
+  decisionId          String          @unique
   paymentId           String
   actionType          ActionType
   razorpayReferenceId String?         // e.g. Payment Link id
@@ -301,7 +316,6 @@ model Execution {
   decision Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
   payment  Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 
-  @@index([decisionId])
   @@index([status])
   @@map("executions")
 }

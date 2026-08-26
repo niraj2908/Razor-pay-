@@ -20,6 +20,14 @@ vi.mock("next/server", async () => {
   return { ...actual, after: (callback: () => void) => callback() };
 });
 
+// The route's `after()` callback (in processing/queue.ts) calls into the
+// recovery engine, which needs a real database - mock it here so this
+// route-contract test suite stays fast and DB-independent. The recovery
+// pipeline itself is tested in candidateBuilder.test.ts.
+vi.mock("@/lib/recovery/candidateBuilder", () => ({
+  buildRecoveryCandidateFromPaymentEvent: vi.fn().mockResolvedValue({ status: "skipped_not_found" }),
+}));
+
 const { POST } = await import("./route");
 
 const SECRET = "route_test_secret";

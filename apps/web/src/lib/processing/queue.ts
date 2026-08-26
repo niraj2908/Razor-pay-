@@ -1,4 +1,5 @@
 import { after } from "next/server";
+import { buildRecoveryCandidateFromPaymentEvent } from "@/lib/recovery/candidateBuilder";
 
 export type ProcessingJob = {
   paymentEventId: string;
@@ -13,13 +14,10 @@ export interface ProcessingQueue {
  * Application-level processing boundary. The webhook route calls `enqueue`
  * and returns immediately - it must never await recovery/decision logic.
  *
- * This is deliberately NOT a real queue yet: no recovery, decision, or
- * policy engine exists in this codebase (see README - all marked
- * "Planned"). Building one out here would recreate exactly the "entire
- * recovery engine inside the webhook request" this boundary exists to
- * prevent. `enqueue` currently just marks the processing lifecycle so it's
- * observable; swapping the body of `enqueue` for a real queue client (SQS,
- * BullMQ, etc.) later requires no change to callers.
+ * This is deliberately NOT a real queue yet: `enqueue` currently calls the
+ * recovery decision engine in-process rather than publishing to a real
+ * queue client (SQS, BullMQ, etc.) - swapping that in later requires no
+ * change to callers.
  *
  * `next/server`'s `after()` runs its callback once the response has been
  * sent, without delaying that response - unlike a bare fire-and-forget
@@ -29,8 +27,23 @@ export interface ProcessingQueue {
  */
 class InProcessQueue implements ProcessingQueue {
   enqueue(job: ProcessingJob): void {
-    after(() => {
+    after(async () => {
       console.log("[processing] processing started", job);
+      try {
+        const result = await buildRecoveryCandidateFromPaymentEvent(job.paymentEventId);
+        console.log("[processing] recovery candidate result", {
+          paymentEventId: job.paymentEventId,
+          ...result,
+        });
+      } catch (error) {
+        // Fail safe: a recovery-engine failure must never surface as a
+        // webhook failure (the response is already sent) and must never
+        // trigger a financial action on its own.
+        console.error("[processing] recovery candidate failed", {
+          paymentEventId: job.paymentEventId,
+          error: error instanceof Error ? error.message : "unknown_error",
+        });
+      }
       console.log("[processing] processing completed", job);
     });
   }
