@@ -46,7 +46,10 @@ export type ExecutionRejectionReason =
   | "missing_decision_id"
   | "missing_payment_id"
   | "invalid_amount"
-  | "decision_stale";
+  | "decision_stale"
+  // Phase 23 Step 5 hardening: the decision's own RevenueRiskEvent carries a
+  // CONTROL ExperimentAssignment - see isControlArmForbidden() below.
+  | "control_arm_forbidden";
 
 export type ExecutionResult =
   | { status: "rejected"; reason: ExecutionRejectionReason }
@@ -94,6 +97,45 @@ function validateCommand(command: ExecutionCommand): ExecutionRejectionReason | 
     return "decision_stale";
   }
   return null;
+}
+
+/**
+ * Defense-in-depth CONTROL enforcement (Phase 23 Step 5 hardening).
+ *
+ * `experimentService.ts`'s `isExecutionAllowed()` already blocks CONTROL at
+ * the processing-layer call site (candidateBuilder.ts) - but that is
+ * caller-side discipline, not something the Execution Service itself
+ * enforces. This function makes the Execution Service independently reject
+ * a CONTROL candidate regardless of caller: a future automatic wiring
+ * path, an accidental direct call, a refactor, a background job, or
+ * internal API misuse can never execute one, because this check runs here
+ * too, not only upstream.
+ *
+ * Deliberately re-resolves the assignment from the DATABASE via the
+ * existing Decision -> RevenueRiskEvent -> ExperimentAssignment relations
+ * (no new schema, no duplicated experiment fields) rather than trusting
+ * anything the caller supplied - `ExecutionCommand` itself carries no
+ * arm/experimentId/assignment field at all, so there is nothing for a
+ * caller to spoof in the first place; this function is the only source of
+ * truth for whether a command's decision belongs to CONTROL.
+ *
+ * Only a value of exactly "CONTROL" forbids execution. A decision with NO
+ * ExperimentAssignment (the RevenueRiskEvent's experimentAssignmentId is
+ * null, or the Decision itself cannot be found) is NOT treated as CONTROL -
+ * that would silently break all non-experiment recovery behavior, which
+ * must keep working exactly as before Step 5. TREATMENT is likewise never
+ * specially privileged here; it simply isn't CONTROL, so it falls through
+ * to every other check unchanged (safety/policy already ran upstream in
+ * the Decision Engine; idempotency and payment-state checks below still
+ * apply in full).
+ */
+async function isControlArmForbidden(decisionId: string): Promise<boolean> {
+  const decision = await prisma.decision.findUnique({
+    where: { id: decisionId },
+    include: { revenueRiskEvent: { include: { experimentAssignment: true } } },
+  });
+  const arm = decision?.revenueRiskEvent?.experimentAssignment?.arm;
+  return arm === "CONTROL";
 }
 
 function mapStrategyToActionType(strategy: CommandStrategy): ActionType {
@@ -282,11 +324,27 @@ async function executeCapture(
  * FAILED, and is never automatically retried - both because the original
  * request may have already succeeded, and because this phase deliberately
  * does not implement any automatic-retry loop for a financial mutation.
+ *
+ * Flow (Phase 23 Step 5 hardening adds a step): validate -> independently
+ * re-check CONTROL from the database (isControlArmForbidden) -> reserve
+ * (DB unique constraint on Execution.decisionId, P2002-based, never
+ * check-then-insert) -> re-verify the payment is still eligible (never
+ * trust the state the decision was made against) -> call Razorpay ->
+ * record the real, definitive-or-ambiguous outcome -> audit. The CONTROL
+ * check runs BEFORE Execution.create() and BEFORE any RazorpayClient call -
+ * a CONTROL decision creates no Execution row and makes no Razorpay call.
  */
 export async function executeCommand(command: ExecutionCommand): Promise<ExecutionResult> {
   const rejection = validateCommand(command);
   if (rejection) {
     return { status: "rejected", reason: rejection };
+  }
+
+  if (await isControlArmForbidden(command.decisionId)) {
+    console.warn("[execution-service] execution blocked - CONTROL arm assignment", {
+      decisionId: command.decisionId,
+    });
+    return { status: "rejected", reason: "control_arm_forbidden" };
   }
 
   let execution;

@@ -422,6 +422,12 @@ model Outcome {
 enum ExperimentStatus {
   DRAFT
   RUNNING
+  // Phase 23 Step 5: temporarily halts new assignments (e.g. investigating an
+  // anomaly) without the finality of COMPLETED (which means "done, ready for
+  // analysis," not "paused, may resume") and without a boolean flag hack
+  // layered on top of RUNNING - see docs/decision-engine.md. Pausing never
+  // changes any existing participant's arm; it only stops NEW assignments.
+  PAUSED
   COMPLETED
 }
 
@@ -435,6 +441,17 @@ model Experiment {
   // Percentage of eligible candidates actually sampled into this experiment
   // at all (the remainder is neither CONTROL nor TREATMENT - simply excluded).
   trafficAllocationPercent Int @default(100)
+  // Phase 23 Step 5: of the candidates sampled into the experiment (above),
+  // the percentage assigned to TREATMENT - the remainder is CONTROL by
+  // construction. Modeled as a single field rather than separate
+  // treatment/control percentages: representing CONTROL as "100 - treatment"
+  // makes an invalid (non-100-summing) configuration structurally
+  // impossible instead of merely something to validate. Required (no
+  // default) because allocation must always be explicit, never silently
+  // assumed - see assignmentEngine.ts. Changing this value for a running
+  // experiment would silently reshuffle who is in which arm, so treat any
+  // change as a new experiment (new `version`), never an in-place edit.
+  treatmentAllocationPercent Int
   // Plain version/description tags, not JSON - CONTROL's meaning is a fixed
   // architectural invariant (no execution is ever allowed for it - Phase
   // 23 Step 1 section 8), so "no_intervention" is intentionally the default
@@ -474,6 +491,13 @@ model ExperimentAssignment {
   // Version tag of the eligibility ruleset applied BEFORE randomization -
   // never recomputed after the fact (Phase 23 Step 1, section 8/10).
   eligibilityVersion String
+  // Phase 23 Step 5: identifies the deterministic hashing strategy used to
+  // compute `arm` (e.g. "sha256-v1") - see assignmentEngine.ts. Recorded so
+  // the algorithm can evolve later (a new version string) without ever
+  // reinterpreting or recomputing an existing assignment under a different
+  // rule; a historical row's arm must remain exactly what it was computed
+  // as, forever.
+  assignmentAlgorithm String
 
   experiment        Experiment         @relation(fields: [experimentId], references: [id], onDelete: Cascade)
   // A CANDIDATE-unit assignment applies to exactly one RevenueRiskEvent in

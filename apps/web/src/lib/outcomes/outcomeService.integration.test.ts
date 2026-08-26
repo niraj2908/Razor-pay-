@@ -135,7 +135,12 @@ describe("processOutcomeAttributionForPaymentEvent against a real database", () 
   it("17. experiment assignment context is preserved and reachable from the Outcome", async () => {
     const candidate = await makeCandidate("CAPTURED");
     const experiment = await prisma.experiment.create({
-      data: { name: `Outcome test experiment ${TAG}`, version: "v1", treatmentDefinition: "policy-v1" },
+      data: {
+        name: `Outcome test experiment ${TAG}`,
+        version: "v1",
+        treatmentDefinition: "policy-v1",
+        treatmentAllocationPercent: 50,
+      },
     });
     createdExperimentIds.push(experiment.id);
     const assignment = await prisma.experimentAssignment.create({
@@ -145,6 +150,7 @@ describe("processOutcomeAttributionForPaymentEvent against a real database", () 
         unitKey: candidate.riskEventId,
         arm: "TREATMENT",
         eligibilityVersion: "eligibility-v1",
+        assignmentAlgorithm: "sha256-v1",
       },
     });
     await prisma.revenueRiskEvent.update({

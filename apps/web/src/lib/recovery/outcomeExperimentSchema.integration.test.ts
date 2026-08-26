@@ -192,6 +192,7 @@ describe("Experiment model", () => {
         version: "v1",
         hypothesis: "Sending a Payment Link within 1 hour increases recovery.",
         treatmentDefinition: "policy-v1",
+        treatmentAllocationPercent: 50,
       },
     });
     createdExperimentIds.push(experiment.id);
@@ -206,7 +207,12 @@ describe("Experiment model", () => {
 describe("ExperimentAssignment model", () => {
   it("4. creates a valid CONTROL assignment", async () => {
     const experiment = await prisma.experiment.create({
-      data: { name: `Schema test experiment ${TAG}`, version: "v1", treatmentDefinition: "policy-v1" },
+      data: {
+        name: `Schema test experiment ${TAG}`,
+        version: "v1",
+        treatmentDefinition: "policy-v1",
+        treatmentAllocationPercent: 50,
+      },
     });
     createdExperimentIds.push(experiment.id);
     const { riskEventId } = await makeCandidate();
@@ -218,6 +224,7 @@ describe("ExperimentAssignment model", () => {
         unitKey: riskEventId,
         arm: "CONTROL",
         eligibilityVersion: "eligibility-v1",
+        assignmentAlgorithm: "sha256-v1",
       },
     });
 
@@ -226,7 +233,12 @@ describe("ExperimentAssignment model", () => {
 
   it("5. creates a valid TREATMENT assignment", async () => {
     const experiment = await prisma.experiment.create({
-      data: { name: `Schema test experiment ${TAG}`, version: "v1", treatmentDefinition: "policy-v1" },
+      data: {
+        name: `Schema test experiment ${TAG}`,
+        version: "v1",
+        treatmentDefinition: "policy-v1",
+        treatmentAllocationPercent: 50,
+      },
     });
     createdExperimentIds.push(experiment.id);
     const { riskEventId } = await makeCandidate();
@@ -238,6 +250,7 @@ describe("ExperimentAssignment model", () => {
         unitKey: riskEventId,
         arm: "TREATMENT",
         eligibilityVersion: "eligibility-v1",
+        assignmentAlgorithm: "sha256-v1",
       },
     });
 
@@ -246,7 +259,12 @@ describe("ExperimentAssignment model", () => {
 
   it("6. rejects a duplicate assignment for the same experiment+unit (real DB unique constraint, not check-then-insert)", async () => {
     const experiment = await prisma.experiment.create({
-      data: { name: `Schema test experiment ${TAG}`, version: "v1", treatmentDefinition: "policy-v1" },
+      data: {
+        name: `Schema test experiment ${TAG}`,
+        version: "v1",
+        treatmentDefinition: "policy-v1",
+        treatmentAllocationPercent: 50,
+      },
     });
     createdExperimentIds.push(experiment.id);
     const { riskEventId } = await makeCandidate();
@@ -258,6 +276,7 @@ describe("ExperimentAssignment model", () => {
         unitKey: riskEventId,
         arm: "TREATMENT",
         eligibilityVersion: "eligibility-v1",
+        assignmentAlgorithm: "sha256-v1",
       },
     });
 
@@ -269,6 +288,7 @@ describe("ExperimentAssignment model", () => {
           unitKey: riskEventId,
           arm: "CONTROL", // even a different arm must not be allowed to double-assign
           eligibilityVersion: "eligibility-v1",
+          assignmentAlgorithm: "sha256-v1",
         },
       })
     ).rejects.toMatchObject({ code: "P2002" }); // real Postgres unique violation
@@ -276,7 +296,12 @@ describe("ExperimentAssignment model", () => {
 
   it("a CUSTOMER-unit assignment can be reused across multiple recovery candidates", async () => {
     const experiment = await prisma.experiment.create({
-      data: { name: `Schema test experiment ${TAG}`, version: "v1", treatmentDefinition: "policy-v1" },
+      data: {
+        name: `Schema test experiment ${TAG}`,
+        version: "v1",
+        treatmentDefinition: "policy-v1",
+        treatmentAllocationPercent: 50,
+      },
     });
     createdExperimentIds.push(experiment.id);
 
@@ -293,6 +318,7 @@ describe("ExperimentAssignment model", () => {
         unitKey: customer.id,
         arm: "TREATMENT",
         eligibilityVersion: "eligibility-v1",
+        assignmentAlgorithm: "sha256-v1",
       },
     });
 

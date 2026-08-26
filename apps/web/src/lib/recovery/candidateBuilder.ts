@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import type { ActionType } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { evaluateRecoveryDecision } from "./decisionEngine";
 import { buildRecoveryAuditEvent } from "./audit";
 import { buildExecutionCommand, receiveExecutionCommand } from "./execution";
 import { FailureReason, PaymentMethod, PaymentState, RecoveryContext, Strategy } from "./types";
+import { isExecutionAllowed, resolveExperimentAssignment } from "@/lib/experiments/experimentService";
 
 export type CandidateBuildResult =
   | { status: "skipped_not_found" }
@@ -108,15 +110,40 @@ export async function buildRecoveryCandidateFromPaymentEvent(
   const trace = evaluateRecoveryDecision(context);
   const audit = buildRecoveryAuditEvent(trace);
 
+  // Pre-generated so it can serve as the CANDIDATE-unit experiment
+  // assignment key (Phase 23 Step 5) BEFORE the RevenueRiskEvent row that
+  // will eventually carry this same id even exists - assignment must
+  // complete first (Section 11: assignment before intervention), and the
+  // RevenueRiskEvent row is created with this id explicitly below instead
+  // of relying on Prisma's default cuid() generation.
+  const revenueRiskEventId = randomUUID();
+
+  // A genuinely separate, PRECEDING database round trip (not nested inside
+  // the transaction below) - this is what guarantees the experiment
+  // assignment's `assignedAt` is never later than the Decision's
+  // `decidedAt` created a few lines further down (Section 11), and it is
+  // what lets a CONTROL assignment structurally block the execution
+  // command further below, regardless of what the Decision Engine itself
+  // recommends (Section 8) - never by hoping the engine returns WAIT.
+  const experimentResolution = await resolveExperimentAssignment({
+    customerId: payment.customerId,
+    candidateKey: revenueRiskEventId,
+    paymentState: payment.status,
+  });
+  const experimentAssignmentId =
+    experimentResolution.outcome === "assigned" ? experimentResolution.assignment.id : null;
+
   await prisma.$transaction(async (tx) => {
     const riskEvent = await tx.revenueRiskEvent.create({
       data: {
+        id: revenueRiskEventId,
         merchantId: payment.merchantId,
         paymentId: payment.id,
         diagnosis: context.failureReason,
         amountAtRisk: context.amount,
         naturalRecoveryProbability: trace.naturalRecoveryProbability,
         dataSource: "REAL_RAZORPAY_TEST_MODE",
+        experimentAssignmentId,
       },
     });
 
@@ -179,7 +206,20 @@ export async function buildRecoveryCandidateFromPaymentEvent(
 
   const command = buildExecutionCommand(trace);
   if (command) {
-    receiveExecutionCommand(command);
+    // The Decision Engine's own ACT result is NEVER itself sufficient to
+    // execute (Phase 23 Step 5, Section 8/9): a CONTROL assignment blocks
+    // dispatch here unconditionally, and a TREATMENT (or no-experiment)
+    // assignment only means "eligible for normal evaluation" - safety and
+    // policy, already applied inside evaluateRecoveryDecision above, remain
+    // fully authoritative either way.
+    if (isExecutionAllowed(experimentResolution)) {
+      receiveExecutionCommand(command);
+    } else {
+      console.log("[experiments] execution command suppressed - CONTROL arm", {
+        decisionId: trace.decisionId,
+        paymentId: payment.id,
+      });
+    }
   }
 
   return { status: "evaluated", decisionId: trace.decisionId, selectedAction: trace.selectedAction };

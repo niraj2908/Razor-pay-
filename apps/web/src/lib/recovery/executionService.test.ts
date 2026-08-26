@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => {
     executionFindUniqueOrThrow,
     executionUpdate,
     paymentFindUnique: vi.fn(),
+    decisionFindUnique: vi.fn(),
     auditEventCreate: vi.fn(async () => ({ id: "audit_1" })),
     paymentLinksCreate: vi.fn(),
     paymentsFetch: vi.fn(),
@@ -77,6 +78,7 @@ vi.mock("@/lib/db", () => ({
       update: mocks.executionUpdate,
     },
     payment: { findUnique: mocks.paymentFindUnique },
+    decision: { findUnique: mocks.decisionFindUnique },
     auditEvent: { create: mocks.auditEventCreate },
   },
 }));
@@ -119,7 +121,24 @@ describe("executeCommand", () => {
       status: "FAILED",
       razorpayPaymentId: "pay_razorpay_1",
     });
+    // Default: no ExperimentAssignment at all - matches every pre-existing
+    // (pre-Phase-23-Step-5) test in this file, none of which set up an
+    // experiment. This is the "NO ASSIGNMENT" case, never CONTROL.
+    mocks.decisionFindUnique.mockResolvedValue({
+      id: "decision_1",
+      revenueRiskEvent: { experimentAssignment: null },
+    });
   });
+
+  function mockAssignmentArm(decisionId: string, arm: "CONTROL" | "TREATMENT" | null) {
+    mocks.decisionFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
+      if (where.id !== decisionId) return { id: where.id, revenueRiskEvent: { experimentAssignment: null } };
+      return {
+        id: decisionId,
+        revenueRiskEvent: { experimentAssignment: arm ? { arm } : null },
+      };
+    });
+  }
 
   describe("structural validation", () => {
     it("rejects action=WAIT with strategy=PAYMENT_LINK", async () => {
@@ -334,6 +353,89 @@ describe("executeCommand", () => {
       const succeededOrExisting = results.filter((r) => r.status === "succeeded" || r.status === "existing");
       expect(succeededOrExisting).toHaveLength(5);
       expect(mocks.executionStore.size).toBe(1);
+    });
+  });
+
+  // Phase 23 Step 5 hardening: defense-in-depth CONTROL enforcement inside
+  // the Execution Service itself (isControlArmForbidden), independent of
+  // the processing-layer gate in experimentService.ts.
+  describe("experiment control enforcement (defense-in-depth)", () => {
+    it("1/2/3. CONTROL is rejected before any Execution row or Razorpay call", async () => {
+      mockAssignmentArm("decision_control", "CONTROL");
+
+      const result = await executeCommand(makeCommand({ decisionId: "decision_control" }));
+
+      expect(result).toEqual({ status: "rejected", reason: "control_arm_forbidden" });
+      expect(mocks.executionCreate).not.toHaveBeenCalled(); // 2. zero Execution rows
+      expect(mocks.paymentLinksCreate).not.toHaveBeenCalled(); // 3. zero Razorpay calls
+      expect(mocks.paymentsFetch).not.toHaveBeenCalled();
+      expect(mocks.paymentsCapture).not.toHaveBeenCalled();
+      expect(mocks.executionStore.size).toBe(0);
+    });
+
+    it("4. TREATMENT proceeds through the existing execution behavior unchanged", async () => {
+      mockAssignmentArm("decision_treatment", "TREATMENT");
+      mocks.paymentLinksCreate.mockResolvedValue({ id: "plink_treatment", shortUrl: "https://rzp.io/i/t", status: "created" });
+
+      const result = await executeCommand(makeCommand({ decisionId: "decision_treatment" }));
+
+      expect(mocks.paymentLinksCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 10000, referenceId: "decision_treatment" })
+      );
+      expect(result).toMatchObject({ status: "succeeded", razorpayReferenceId: "plink_treatment" });
+    });
+
+    it("5. NO assignment (no ExperimentAssignment at all) proceeds through existing execution behavior unchanged", async () => {
+      // Uses the beforeEach default (experimentAssignment: null) - the same
+      // shape every pre-Step-5 caller of executeCommand produces today.
+      mocks.paymentLinksCreate.mockResolvedValue({ id: "plink_none", shortUrl: "https://rzp.io/i/n", status: "created" });
+
+      const result = await executeCommand(makeCommand({ decisionId: "decision_1" }));
+
+      expect(mocks.paymentLinksCreate).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ status: "succeeded", razorpayReferenceId: "plink_none" });
+    });
+
+    it("6. a caller cannot override CONTROL by attaching a fake TREATMENT/arm field to the command - ExecutionCommand has no such field and the service re-resolves from the database regardless", async () => {
+      mockAssignmentArm("decision_spoofed", "CONTROL");
+      const spoofedCommand = { ...makeCommand({ decisionId: "decision_spoofed" }), arm: "TREATMENT", experimentId: "exp_fake" };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await executeCommand(spoofedCommand as any);
+
+      expect(result).toEqual({ status: "rejected", reason: "control_arm_forbidden" });
+      expect(mocks.paymentLinksCreate).not.toHaveBeenCalled();
+    });
+
+    it("7. concurrent CONTROL execution attempts all reject - none reserves an Execution row", async () => {
+      mockAssignmentArm("decision_control_race", "CONTROL");
+      const commands = Array.from({ length: 5 }, () => makeCommand({ decisionId: "decision_control_race" }));
+
+      const results = await Promise.all(commands.map((command) => executeCommand(command)));
+
+      expect(results.every((r) => r.status === "rejected")).toBe(true);
+      expect(mocks.executionCreate).not.toHaveBeenCalled();
+      expect(mocks.paymentLinksCreate).not.toHaveBeenCalled();
+      expect(mocks.executionStore.size).toBe(0);
+    });
+
+    it("9. a TREATMENT-assigned but structurally invalid command is still rejected (existing structural validation remains authoritative)", async () => {
+      mockAssignmentArm("decision_treatment_invalid", "TREATMENT");
+
+      const result = await executeCommand(makeCommand({ decisionId: "decision_treatment_invalid", amount: 0 }));
+
+      expect(result).toEqual({ status: "rejected", reason: "invalid_amount" });
+      expect(mocks.decisionFindUnique).not.toHaveBeenCalled(); // structural validation runs BEFORE the CONTROL check
+    });
+
+    it("10. a TREATMENT-assigned but already-captured payment is still skipped (existing payment-eligibility check remains authoritative)", async () => {
+      mockAssignmentArm("decision_treatment_captured", "TREATMENT");
+      mocks.paymentFindUnique.mockResolvedValue({ id: "pay_1", merchantId: "m1", status: "CAPTURED", razorpayPaymentId: "p1" });
+
+      const result = await executeCommand(makeCommand({ decisionId: "decision_treatment_captured" }));
+
+      expect(mocks.paymentLinksCreate).not.toHaveBeenCalled();
+      expect(result).toEqual({ status: "skipped", executionId: "execution_1", reason: "payment_already_succeeded" });
     });
   });
 });
