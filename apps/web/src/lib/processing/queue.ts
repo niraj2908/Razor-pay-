@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import { buildRecoveryCandidateFromPaymentEvent } from "@/lib/recovery/candidateBuilder";
 import { associatePaymentEvent } from "@/lib/webhooks/paymentAssociation";
+import { processOutcomeAttributionForPaymentEvent } from "@/lib/outcomes/outcomeService";
 
 export type ProcessingJob = {
   paymentEventId: string;
@@ -55,6 +56,20 @@ class InProcessQueue implements ProcessingQueue {
         // webhook failure (the response is already sent) and must never
         // trigger a financial action on its own.
         console.error("[processing] recovery candidate failed", {
+          paymentEventId: job.paymentEventId,
+          error: error instanceof Error ? error.message : "unknown_error",
+        });
+      }
+      try {
+        const outcome = await processOutcomeAttributionForPaymentEvent(job.paymentEventId);
+        console.log("[processing] outcome attribution result", {
+          paymentEventId: job.paymentEventId,
+          ...outcome,
+        });
+      } catch (error) {
+        // Fail safe: attribution never blocks/affects the webhook response,
+        // and a failure here must never be mistaken for a financial action.
+        console.error("[processing] outcome attribution failed", {
           paymentEventId: job.paymentEventId,
           error: error instanceof Error ? error.message : "unknown_error",
         });

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const buildRecoveryCandidateFromPaymentEvent = vi.fn();
 const associatePaymentEvent = vi.fn();
+const processOutcomeAttributionForPaymentEvent = vi.fn();
 
 vi.mock("@/lib/recovery/candidateBuilder", () => ({
   buildRecoveryCandidateFromPaymentEvent,
@@ -9,6 +10,10 @@ vi.mock("@/lib/recovery/candidateBuilder", () => ({
 
 vi.mock("@/lib/webhooks/paymentAssociation", () => ({
   associatePaymentEvent,
+}));
+
+vi.mock("@/lib/outcomes/outcomeService", () => ({
+  processOutcomeAttributionForPaymentEvent,
 }));
 
 // `after()` needs a real Next.js request scope - run its callback
@@ -24,6 +29,7 @@ describe("processingQueue.enqueue", () => {
     vi.clearAllMocks();
     associatePaymentEvent.mockResolvedValue({ status: "unassociated", reason: "unsupported_event_type_for_association" });
     buildRecoveryCandidateFromPaymentEvent.mockResolvedValue({ status: "skipped_fixture" });
+    processOutcomeAttributionForPaymentEvent.mockResolvedValue({ status: "skipped_unlinked" });
   });
 
   it("calls the payment association step with the job's paymentEventId", async () => {
@@ -34,6 +40,21 @@ describe("processingQueue.enqueue", () => {
   it("calls the recovery candidate builder with the job's paymentEventId", async () => {
     processingQueue.enqueue({ paymentEventId: "evt_1", eventType: "payment.captured" });
     await vi.waitFor(() => expect(buildRecoveryCandidateFromPaymentEvent).toHaveBeenCalledWith("evt_1"));
+  });
+
+  it("calls outcome attribution with the job's paymentEventId", async () => {
+    processingQueue.enqueue({ paymentEventId: "evt_1", eventType: "payment.captured" });
+    await vi.waitFor(() => expect(processOutcomeAttributionForPaymentEvent).toHaveBeenCalledWith("evt_1"));
+  });
+
+  it("still runs outcome attribution even when the recovery candidate builder fails (fail-safe)", async () => {
+    buildRecoveryCandidateFromPaymentEvent.mockRejectedValue(new Error("db unreachable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    processingQueue.enqueue({ paymentEventId: "evt_4", eventType: "payment.captured" });
+
+    await vi.waitFor(() => expect(processOutcomeAttributionForPaymentEvent).toHaveBeenCalledWith("evt_4"));
+    errorSpy.mockRestore();
   });
 
   it("still runs the recovery candidate builder even when association fails (Phase 23 fail-safe)", async () => {
