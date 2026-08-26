@@ -11,6 +11,15 @@ vi.mock("@/lib/webhooks/idempotency", () => ({
   ingestPaymentEventIdempotently: ingestMock,
 }));
 
+// `next/server`'s `after()` requires a real request scope set up by Next's
+// server runtime, which isn't present when a route handler is invoked
+// directly (as these tests do). Keep NextRequest/NextResponse real; only
+// stand in for `after` by running its callback immediately.
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>("next/server");
+  return { ...actual, after: (callback: () => void) => callback() };
+});
+
 const { POST } = await import("./route");
 
 const SECRET = "route_test_secret";
@@ -130,5 +139,16 @@ describe("POST /api/webhooks/razorpay", () => {
     );
     expect(response.status).toBe(401);
     expect(ingestMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 (so Razorpay retries) on a genuine database failure, without crashing", async () => {
+    ingestMock.mockRejectedValueOnce(new Error("connection refused"));
+    const request = makeRequest({ body: BODY, eventId: "evt_db_failure" });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(500);
+    const json = await response.json();
+    expect(json.error).toBe("database_failure");
   });
 });

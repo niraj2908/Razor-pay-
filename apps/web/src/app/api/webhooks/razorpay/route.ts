@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyRazorpaySignature } from "@/lib/razorpay/signature";
 import { ingestPaymentEventIdempotently } from "@/lib/webhooks/idempotency";
+import { processingQueue } from "@/lib/processing/queue";
 
 // Signature verification needs node:crypto's timingSafeEqual, which the
 // edge runtime does not provide - this route must run on the Node runtime.
@@ -17,6 +18,11 @@ export async function POST(request: NextRequest) {
   const rawBody = await request.text();
 
   const signatureHeader = request.headers.get(SIGNATURE_HEADER);
+  const eventIdHeader = request.headers.get(EVENT_ID_HEADER);
+  console.log("[razorpay-webhook] received", {
+    razorpayEventId: eventIdHeader,
+  });
+
   const verification = verifyRazorpaySignature(
     rawBody,
     signatureHeader,
@@ -41,7 +47,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "malformed_body" }, { status: 400 });
   }
 
-  const eventId = request.headers.get(EVENT_ID_HEADER);
+  const eventId = eventIdHeader;
   if (!eventId) {
     console.error("[razorpay-webhook] rejected: missing event id header");
     return NextResponse.json({ error: "missing_event_id" }, { status: 400 });
@@ -49,11 +55,25 @@ export async function POST(request: NextRequest) {
 
   const eventType = typeof envelope.event === "string" ? envelope.event : "unknown";
 
-  const result = await ingestPaymentEventIdempotently({
-    razorpayEventId: eventId,
-    eventType,
-    payload: envelope,
-  });
+  let result;
+  try {
+    result = await ingestPaymentEventIdempotently({
+      razorpayEventId: eventId,
+      eventType,
+      payload: envelope,
+    });
+  } catch (error) {
+    // A real DB failure (not a duplicate - that's handled inside
+    // ingestPaymentEventIdempotently and never throws). Log for correlation
+    // by event id only - never log the payload or any credential - and
+    // return a non-2xx so Razorpay retries delivery.
+    console.error("[razorpay-webhook] database failure", {
+      razorpayEventId: eventId,
+      eventType,
+      error: error instanceof Error ? error.message : "unknown_error",
+    });
+    return NextResponse.json({ error: "database_failure" }, { status: 500 });
+  }
 
   if (result.status === "duplicate") {
     console.log("[razorpay-webhook] duplicate delivery ignored", {
@@ -65,6 +85,14 @@ export async function POST(request: NextRequest) {
       razorpayEventId: eventId,
       eventType,
       paymentEventId: result.paymentEventId,
+    });
+    // Enqueue only newly-accepted events - a duplicate delivery was already
+    // enqueued once, on its first (accepted) delivery. Never awaited: the
+    // webhook must acknowledge Razorpay immediately, not wait on downstream
+    // recovery/decision processing.
+    processingQueue.enqueue({
+      paymentEventId: result.paymentEventId,
+      eventType,
     });
   }
 
