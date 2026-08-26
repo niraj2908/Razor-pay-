@@ -172,6 +172,7 @@ model Payment {
   paymentEvents     PaymentEvent[]
   revenueRiskEvents RevenueRiskEvent[]
   executions        Execution[]
+  outcomes          Outcome[]
 
   @@index([merchantId])
   @@index([status])
@@ -191,6 +192,10 @@ model PaymentEvent {
   processedAt     DateTime?
 
   payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  // Phase 23 Step 2: PaymentEvent already provides the raw-event evidence
+  // boundary - Outcome references it directly instead of a new raw-event
+  // table (see docs/decision-engine.md).
+  evidenceForOutcomes Outcome[]
 
   @@index([eventType])
   @@index([receivedAt])
@@ -211,18 +216,25 @@ model RevenueRiskEvent {
   detectedAt                DateTime      @default(now())
   resolvedAt                DateTime?
   dataSource                DataSource    @default(SIMULATED)
+  // Phase 23 Step 2: nullable many-to-one, not a unique 1:1 back-relation -
+  // a CUSTOMER-unit assignment (see ExperimentAssignment) is deliberately
+  // reused across every recovery candidate for that same customer while an
+  // experiment is running, so multiple RevenueRiskEvents may point at the
+  // same assignment. A CANDIDATE-unit assignment still ends up 1:1 in
+  // practice, just not enforced as such at the schema level.
+  experimentAssignmentId    String?
 
-  merchant          Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  payment           Payment            @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  merchant          Merchant              @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  payment           Payment               @relation(fields: [paymentId], references: [id], onDelete: Cascade)
   candidateActions  CandidateAction[]
   decisions         Decision[]
-  outcomes          Outcome[]
   modelPredictions  ModelPrediction[]
-  experimentAssignment ExperimentAssignment?
+  experimentAssignment ExperimentAssignment? @relation(fields: [experimentAssignmentId], references: [id], onDelete: SetNull)
 
   @@index([merchantId])
   @@index([diagnosis])
   @@index([resolvedAt])
+  @@index([experimentAssignmentId])
   @@map("revenue_risk_events")
 }
 
@@ -256,6 +268,7 @@ model Decision {
   chosenAction     CandidateAction? @relation(fields: [chosenActionId], references: [id], onDelete: SetNull)
   evidence         DecisionEvidence[]
   executions       Execution[]
+  outcome          Outcome?
 
   @@index([revenueRiskEventId])
   @@index([decisionType])
@@ -315,22 +328,80 @@ model Execution {
 
   decision Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
   payment  Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  outcome  Outcome?
 
   @@index([status])
   @@map("executions")
 }
 
+// Phase 23 Step 2: has this payment resolved yet, and if it recovered, why?
+// These are deliberately two separate questions (see docs/decision-engine.md):
+// OutcomeStatus is the plain fact of what happened; AttributionStatus (only
+// ever set once status=RECOVERED) is the causal explanation. Collapsing
+// them into one enum would force a redundant FAILED-vs-NOT_RECOVERED
+// distinction with no added meaning.
+enum OutcomeStatus {
+  PENDING       // attribution window still open - not yet resolved
+  RECOVERED     // payment succeeded within the window
+  NOT_RECOVERED // window closed with no success
+}
+
+// Evidence required for each value (Phase 23 Step 1 audit, Step 2 report):
+//   NATURAL_RECOVERY      - status=RECOVERED and executionId is null: no
+//                            intervention was ever executed for this
+//                            decision (CONTROL arm, or a WAIT/STOP/ESCALATE
+//                            decision), so recovery cannot be attributed to us.
+//   INTERVENTION_RECOVERY - status=RECOVERED, executionId is set, and the
+//                            evidence deterministically ties the recovering
+//                            payment/event to that specific Execution (e.g.
+//                            a payment_link.paid webhook whose payment_link
+//                            id matches Execution.razorpayReferenceId).
+//   UNKNOWN               - status=RECOVERED, executionId is set, but the
+//                            evidence does not cleanly establish exclusive
+//                            causation (e.g. the Execution itself resolved
+//                            AMBIGUOUS, or correlating evidence is missing).
+// ASSISTED was evaluated and deliberately NOT added in this step: its
+// evidence criteria depend on Capture-specific ambiguity handling that
+// isn't built yet (Phase 23 Step 1 audit, section 4/7). It can be added
+// later as a single enum value, the same way ActionType.CAPTURE and
+// ExecutionStatus.AMBIGUOUS were added incrementally in Phase 22.
+enum AttributionStatus {
+  NATURAL_RECOVERY
+  INTERVENTION_RECOVERY
+  UNKNOWN
+}
+
+// The minimum Outcome representation (Phase 23 Step 1 audit, section 3).
+// References existing domain rows by ID rather than duplicating any
+// payload - PaymentEvent already is the evidence boundary (section 10).
 model Outcome {
-  id                    String   @id @default(cuid())
-  revenueRiskEventId    String
-  recovered             Boolean
-  recoveredAmount       Int?     // paise
-  attributedIncremental Boolean? // null until the experiment/attribution layer scores it
-  observedAt            DateTime @default(now())
+  id                       String             @id @default(cuid())
+  decisionId               String             @unique // one Outcome per Decision
+  paymentId                String                       // the ORIGINAL payment being evaluated
+  executionId              String?            @unique // null when no intervention was ever executed
+  status                   OutcomeStatus      @default(PENDING)
+  attributionStatus        AttributionStatus?           // set only once status=RECOVERED
+  recoveredAmount          Int?                         // paise
+  currency                 String             @default("INR")
+  observedAt               DateTime           @default(now())
+  // A version tag for the attribution policy in effect (e.g. "attribution-v1"),
+  // NOT a hardcoded window baked into application logic - the actual window
+  // (which may differ by strategy) is a later step's implementation detail;
+  // this field only guarantees we can always identify which policy produced
+  // a given historical Outcome. The relevant decision/intervention timestamps
+  // are already reachable via the decision/execution relations, not duplicated here.
+  attributionPolicyVersion String
+  evidencePaymentEventId   String?                      // the webhook event that proves this outcome, if any
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
 
-  revenueRiskEvent RevenueRiskEvent @relation(fields: [revenueRiskEventId], references: [id], onDelete: Cascade)
+  decision             Decision      @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  payment              Payment       @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  execution            Execution?    @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  evidencePaymentEvent PaymentEvent? @relation(fields: [evidencePaymentEventId], references: [id], onDelete: SetNull)
 
-  @@index([revenueRiskEventId])
+  @@index([paymentId])
+  @@index([status])
   @@map("outcomes")
 }
 
@@ -339,13 +410,32 @@ model Outcome {
 // counterfactual proof engine behind Proof 1 in Section 44)
 // ---------------------------------------------------------------------------
 
+enum ExperimentStatus {
+  DRAFT
+  RUNNING
+  COMPLETED
+}
+
 model Experiment {
-  id          String    @id @default(cuid())
+  id          String           @id @default(cuid())
   name        String
+  version     String           // e.g. "v1" - same versioning convention as modelVersion/policyVersion
+  hypothesis  String?          // what we expect and why, distinct from a general description
   description String?
-  startedAt   DateTime  @default(now())
+  status      ExperimentStatus @default(DRAFT)
+  // Percentage of eligible candidates actually sampled into this experiment
+  // at all (the remainder is neither CONTROL nor TREATMENT - simply excluded).
+  trafficAllocationPercent Int @default(100)
+  // Plain version/description tags, not JSON - CONTROL's meaning is a fixed
+  // architectural invariant (no execution is ever allowed for it - Phase
+  // 23 Step 1 section 8), so "no_intervention" is intentionally the default
+  // rather than a configurable behavior.
+  treatmentDefinition String
+  controlDefinition   String    @default("no_intervention")
+  startedAt   DateTime?         // null while status=DRAFT
   endedAt     DateTime?
-  status      String    @default("RUNNING")
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
 
   assignments ExperimentAssignment[]
   results     ExperimentResult[]
@@ -353,16 +443,37 @@ model Experiment {
   @@map("experiments")
 }
 
+enum AssignmentUnit {
+  CUSTOMER  // preferred randomization unit when a stable Customer identity exists
+  CANDIDATE // fallback unit for guest/anonymous payments (Phase 23 Step 1, section 9)
+}
+
+// Deterministic, auditable assignment (Phase 23 Step 1, section 7/9).
+// unitKey holds a Customer.id when unitType=CUSTOMER, or a RevenueRiskEvent.id
+// when unitType=CANDIDATE - kept as a plain string reference rather than two
+// separate nullable FK columns, since exactly one of the two possible
+// referents ever applies per row and the meaning is fully determined by
+// unitType. The database-level unique constraint below (not a
+// check-then-insert) is what actually prevents a double assignment.
 model ExperimentAssignment {
   id                 String          @id @default(cuid())
   experimentId       String
-  revenueRiskEventId String          @unique
-  group              ExperimentGroup
+  unitType           AssignmentUnit
+  unitKey            String
+  arm                ExperimentGroup
   assignedAt         DateTime        @default(now())
+  // Version tag of the eligibility ruleset applied BEFORE randomization -
+  // never recomputed after the fact (Phase 23 Step 1, section 8/10).
+  eligibilityVersion String
 
-  experiment       Experiment       @relation(fields: [experimentId], references: [id], onDelete: Cascade)
-  revenueRiskEvent RevenueRiskEvent @relation(fields: [revenueRiskEventId], references: [id], onDelete: Cascade)
+  experiment        Experiment         @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  // A CANDIDATE-unit assignment applies to exactly one RevenueRiskEvent in
+  // practice; a CUSTOMER-unit assignment is deliberately reused across every
+  // recovery candidate for that customer while this experiment runs - hence
+  // one-to-many here, not one-to-one.
+  revenueRiskEvents RevenueRiskEvent[]
 
+  @@unique([experimentId, unitType, unitKey])
   @@index([experimentId])
   @@map("experiment_assignments")
 }
