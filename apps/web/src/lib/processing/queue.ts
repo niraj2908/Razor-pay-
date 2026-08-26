@@ -1,5 +1,6 @@
 import { after } from "next/server";
 import { buildRecoveryCandidateFromPaymentEvent } from "@/lib/recovery/candidateBuilder";
+import { associatePaymentEvent } from "@/lib/webhooks/paymentAssociation";
 
 export type ProcessingJob = {
   paymentEventId: string;
@@ -29,6 +30,20 @@ class InProcessQueue implements ProcessingQueue {
   enqueue(job: ProcessingJob): void {
     after(async () => {
       console.log("[processing] processing started", job);
+      try {
+        const association = await associatePaymentEvent(job.paymentEventId);
+        console.log("[processing] payment association result", {
+          paymentEventId: job.paymentEventId,
+          ...association,
+        });
+      } catch (error) {
+        // Fail safe: an association failure must never surface as a
+        // webhook failure (the response is already sent).
+        console.error("[processing] payment association failed", {
+          paymentEventId: job.paymentEventId,
+          error: error instanceof Error ? error.message : "unknown_error",
+        });
+      }
       try {
         const result = await buildRecoveryCandidateFromPaymentEvent(job.paymentEventId);
         console.log("[processing] recovery candidate result", {

@@ -28,6 +28,11 @@ vi.mock("@/lib/recovery/candidateBuilder", () => ({
   buildRecoveryCandidateFromPaymentEvent: vi.fn().mockResolvedValue({ status: "skipped_not_found" }),
 }));
 
+// Same reasoning as above: paymentAssociation.ts needs a real database too.
+vi.mock("@/lib/webhooks/paymentAssociation", () => ({
+  associatePaymentEvent: vi.fn().mockResolvedValue({ status: "skipped_not_found" }),
+}));
+
 const { POST } = await import("./route");
 
 const SECRET = "route_test_secret";

@@ -171,7 +171,8 @@ model Payment {
   customer          Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
   paymentEvents     PaymentEvent[]
   revenueRiskEvents RevenueRiskEvent[]
-  executions        Execution[]
+  executions        Execution[] @relation("ExecutionOriginalPayment")
+  recoveredByExecution Execution? @relation("ExecutionRecoveredPayment")
   outcomes          Outcome[]
 
   @@index([merchantId])
@@ -319,16 +320,24 @@ model MerchantPolicy {
 model Execution {
   id                  String          @id @default(cuid())
   decisionId          String          @unique
-  paymentId           String
+  paymentId           String          // the ORIGINAL payment being recovered
   actionType          ActionType
   razorpayReferenceId String?         // e.g. Payment Link id
   status              ExecutionStatus @default(PENDING)
   executedAt          DateTime        @default(now())
   completedAt         DateTime?
+  // Phase 23 Step 3: the NEW internal Payment created once a Payment Link
+  // this execution issued is paid (payment_link.paid) - a genuinely
+  // different Razorpay payment object than `paymentId` above, never a
+  // rewrite of it. Null until (and unless) that happens. Two separate
+  // named relations to Payment are required since this model now
+  // references Payment twice for two distinct roles.
+  recoveredPaymentId  String?         @unique
 
-  decision Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
-  payment  Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  outcome  Outcome?
+  decision         Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  payment          Payment  @relation("ExecutionOriginalPayment", fields: [paymentId], references: [id], onDelete: Cascade)
+  recoveredPayment Payment? @relation("ExecutionRecoveredPayment", fields: [recoveredPaymentId], references: [id], onDelete: SetNull)
+  outcome          Outcome?
 
   @@index([status])
   @@map("executions")
