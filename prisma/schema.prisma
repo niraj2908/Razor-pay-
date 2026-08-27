@@ -114,6 +114,7 @@ model Merchant {
   policies         MerchantPolicy[]
   networkEvents    NetworkEvent[]
   auditEvents      AuditEvent[]
+  operators        Operator[]
 
   @@map("merchants")
 }
@@ -748,4 +749,68 @@ model AuditEvent {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_events")
+}
+
+// ---------------------------------------------------------------------------
+// Application authentication (Phase 25 Step 2A) and authorization (Phase 25
+// Step 2B). This is APPLICATION OPERATOR identity — the person logging into
+// this product's own UI/API - completely separate from
+// RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET/RAZORPAY_WEBHOOK_SECRET (server-side
+// infrastructure secrets an operator never sees or enters) and from
+// DATABASE_URL/DIRECT_URL.
+// ---------------------------------------------------------------------------
+
+// Phase 25 Step 2B: single-merchant operator model, an explicit product
+// decision (not silently invented) - each Operator belongs to exactly one
+// Merchant. Matches a standard B2B SaaS shape where a merchant's own staff
+// log in and see only their own recovery data; simpler and structurally
+// safer than a multi-merchant join table, which was evaluated and
+// deliberately not chosen. `email` stays GLOBALLY unique (not
+// per-merchant) because login is email+password with no merchant selector
+// (authService.verifyOperatorCredentials looks up by email alone) - the
+// merchant is discovered FROM the matched operator row, not supplied by
+// the caller.
+model Operator {
+  id           String   @id @default(cuid())
+  merchantId   String
+  email        String   @unique
+  // Self-describing scrypt hash string ("scrypt:N:r:p:saltHex:hashHex") -
+  // see password.ts. Never a plaintext password, never reversible.
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  merchant Merchant          @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  sessions OperatorSession[]
+
+  @@index([merchantId])
+  @@map("operators")
+}
+
+// A DB-backed (not stateless-JWT) session, chosen specifically so logout and
+// revocation are real: deleting/expiring this row immediately invalidates
+// the session server-side, regardless of what the client's cookie still
+// contains - a signed/encrypted cookie alone cannot do this without its own
+// server-side deny-list, which is equivalent persisted state anyway.
+model OperatorSession {
+  id         String    @id @default(cuid())
+  operatorId String
+  // SHA-256 hex digest of the actual random session token (see
+  // sessionToken.ts) - the raw token is sent to the browser ONLY as an
+  // HttpOnly cookie and is never itself persisted, so a database read alone
+  // can never be replayed as a valid session credential.
+  tokenHash  String    @unique
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  // Set on logout (or future explicit revocation) - kept as a nullable
+  // timestamp rather than deleting the row outright, so a session's history
+  // (when it was created, when/whether it was ever revoked) stays
+  // inspectable rather than silently disappearing.
+  revokedAt  DateTime?
+
+  operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@index([operatorId])
+  @@index([expiresAt])
+  @@map("operator_sessions")
 }
