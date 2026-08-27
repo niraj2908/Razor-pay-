@@ -55,6 +55,11 @@ export type ExperimentResultOutcome =
 
 export type ExperimentAnalysisResult = {
   experimentId: string;
+  /** Experiment.status as read at calculation time (Phase 24 Step 4) -
+   * exposed so a persistence layer can derive the resultKind (INTERIM vs.
+   * FINAL) lifecycle axis without a second query; this module still never
+   * uses it to influence eligibility/validity/statistics itself. */
+  experimentStatus: "DRAFT" | "RUNNING" | "PAUSED" | "COMPLETED";
   /** ISO 8601. When this specific computation ran - never itself a claim
    * about when the underlying data was collected. */
   calculatedAt: string;
@@ -183,6 +188,7 @@ export async function computeExperimentResult(
 
   const result: ExperimentAnalysisResult = {
     experimentId: experiment.id,
+    experimentStatus: experiment.status,
     calculatedAt: now.toISOString(),
     eligibilityLogicVersion: ELIGIBILITY_LOGIC_VERSION,
     statisticalMethodVersion: STATISTICAL_METHOD_VERSION,

@@ -465,6 +465,7 @@ model Experiment {
 
   assignments ExperimentAssignment[]
   results     ExperimentResult[]
+  measurementResults ExperimentMeasurementResult[]
 
   @@map("experiments")
 }
@@ -528,6 +529,163 @@ model ExperimentResult {
 
   @@unique([experimentId, group])
   @@map("experiment_results")
+}
+
+// ---------------------------------------------------------------------------
+// Persisted measurement snapshots (Phase 24 Step 3/4). A DERIVED, immutable
+// record of one run of the measurement engine (eligibility -> analysisUnit
+// -> validity -> statistics) - never a source of truth. The underlying
+// ExperimentAssignment/RevenueRiskEvent/Decision/Execution/Outcome rows
+// remain authoritative forever; this table only remembers what the engine
+// concluded, and when, and under which algorithm versions, so a number can
+// be explained and reproduced without re-running history from scratch.
+//
+// Deliberately a NEW model rather than extending the existing, currently
+// unreferenced ExperimentResult above (Phase 24 Step 3 architecture
+// review): ExperimentResult's `@@unique([experimentId, group])` shape
+// structurally forbids keeping more than one calculation per arm, and has
+// no room for a confidence interval, validity evidence, or version
+// metadata. ExperimentResult itself is left untouched - it has zero rows
+// and zero application-code callers as of this migration (verified by
+// direct inspection before this change), so removing or repurposing it is
+// a separate, later, deliberate decision, not something to conflate here.
+// ---------------------------------------------------------------------------
+
+enum MeasurementResultKind {
+  // Computed while the experiment is still RUNNING/PAUSED, or before its
+  // observation window has fully matured - monitoring-only, never a causal
+  // conclusion (Phase 24 Step 3 Section 9).
+  INTERIM
+  // Computed only once Experiment.status=COMPLETED AND every analyzable
+  // unit's observation window has closed - see resultStatus.ts's
+  // `composeMeasurementResult`. Multiple FINAL snapshots for the same
+  // experiment are permitted at the schema level (e.g. a bug-fix
+  // recalculation after a COMPLETED experiment's first FINAL snapshot) -
+  // "the" final result is always the most recently generated one,
+  // determined by querying `ORDER BY generatedAt DESC`, never a separate
+  // mutable pointer (Phase 24 Step 3 Section 10).
+  FINAL
+}
+
+// Deliberately distinct from ExperimentValidityStatus (validity.ts) and
+// from Experiment.status (ExperimentStatus) - Phase 24 Step 3 Section 8's
+// required clean separation: this describes ONE snapshot's own
+// trustworthiness and conclusiveness, never the experiment's operational
+// lifecycle. VALID_INCONCLUSIVE and VALID_EFFECT are BOTH only reachable
+// when the underlying validity check is VALID - the split between them
+// exists purely to prevent "treatment > control" or "confidence interval
+// merely excludes zero" from being read as a business claim on their own
+// (Phase 24 Step 4's critical refinement - see resultStatus.ts).
+enum MeasurementResultStatus {
+  INSUFFICIENT_DATA
+  INVALID
+  VALID_INCONCLUSIVE
+  VALID_EFFECT
+}
+
+model ExperimentMeasurementResult {
+  id           String                @id @default(cuid())
+  experimentId String
+  // Per-experiment sequential version number - NEVER assigned via a bare
+  // "SELECT MAX(version)+1 THEN INSERT" (race-prone, see
+  // experimentMeasurementResultService.ts); the persistence service
+  // optimistically computes the next value and relies on the unique
+  // constraint below to reject a losing concurrent writer, which then
+  // retries with a freshly-read value - the constraint, not application
+  // logic, is what actually prevents two rows ever sharing a version.
+  version      Int
+  resultKind   MeasurementResultKind
+  resultStatus MeasurementResultStatus
+
+  // When this row was written (DB-assigned) vs. when the calculation itself
+  // ran (application-assigned, from the same `now` the engine was given) -
+  // ordinarily the same instant, kept as two fields because they are
+  // conceptually distinct (Phase 24 Step 3 Section 6).
+  generatedAt  DateTime @default(now())
+  calculatedAt DateTime
+  // The observation cutoff the engine was run with (computeExperimentResult's
+  // `now` parameter) - the single most important reproducibility field:
+  // "as of this instant" is what makes "why did this report ₹X" answerable.
+  dataCutoffAt DateTime
+
+  // Section 15/18: deterministic code-constant version tags, never an
+  // LLM-generated or git-commit-hash-only version - see
+  // experimentResultService.ts's ELIGIBILITY_LOGIC_VERSION/etc.
+  statisticalMethodVersion String
+  eligibilityLogicVersion  String
+  validityLogicVersion     String
+  confidenceLevel          Float
+
+  // The configured minimum practical (business) effect used for THIS
+  // calculation's VALID_INCONCLUSIVE/VALID_EFFECT decision, if any was
+  // supplied - null means none was configured, and resultStatus can then
+  // never be VALID_EFFECT (Phase 24 Step 4's critical refinement). Persisted
+  // so a later reader can see WHY a status was chosen, never silently
+  // invented if it was absent.
+  minimumPracticalEffectRateDifference Float?
+
+  totalAssignments         Int
+  treatmentAnalyzableUnits Int
+  treatmentSuccessUnits    Int
+  treatmentRate            Float?
+  treatmentRateLower       Float?
+  treatmentRateUpper       Float?
+  treatmentRecoveredGMVPaise Int // paise - observed, never itself "incremental"
+
+  controlAnalyzableUnits Int
+  controlSuccessUnits    Int
+  controlRate            Float?
+  controlRateLower       Float?
+  controlRateUpper       Float?
+  controlRecoveredGMVPaise Int // paise - observed, never itself "incremental"
+
+  // Explicitly OBSERVED_TREATMENT_CONTROL_DIFFERENCE (statistics.ts) - a raw
+  // sample statistic, never itself a causal claim; only combined with
+  // resultStatus=VALID_EFFECT does it support an incremental interpretation.
+  observedDifference      Float?
+  observedDifferenceLower Float?
+  observedDifferenceUpper Float?
+
+  // Null together whenever statistics.ts's computeIncrementalGMV returned
+  // "undefined" (e.g. zero treatment successes) - never a fabricated zero.
+  // Deliberately two distinct, separately-named fields (Phase 24 Step 4
+  // Section 9): never a single generic "uplift" column.
+  estimatedCounterfactualTreatmentGMVPaise Int? // paise
+  estimatedIncrementalGMVPaise             Int? // paise, signed - can be negative
+
+  // Section 14/20: UNKNOWN and excluded observations are counted, never
+  // silently dropped or folded into success/failure.
+  treatmentUnknownOnlyUnits Int
+  controlUnknownOnlyUnits   Int
+  excludedUnitsTotal        Int
+  // {reason: count} - the exact shape validity.ts's own
+  // `excluded_assignments_summary` check already produces; a fixed, small,
+  // code-defined structure, not open-ended data (Section 13/19's
+  // deliberate exception to "prefer typed columns").
+  exclusionReasonCounts Json
+
+  // The full ValidityCheck[] array from validity.ts, verbatim - a fixed,
+  // small, code-defined shape that changes only when validityLogicVersion
+  // changes; not normalized into a separate per-check table (Section 13/19).
+  validityChecks Json
+
+  experiment Experiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+
+  @@unique([experimentId, version], name: "experimentVersionKey", map: "experiment_measurement_results_version_key")
+  // Idempotent-calculation identity (Section 5/11): the SAME experiment,
+  // computed under the SAME three algorithm versions, as of the SAME data
+  // cutoff, is definitionally the SAME result - retrying that exact
+  // calculation must return the existing row, never create a duplicate.
+  // `name:` gives the Prisma Client a stable, readable compound-lookup
+  // identifier (`calcIdentityKey`) independent of Prisma's default
+  // underscore-concatenated field-name convention - purely client-side
+  // generation metadata, no effect on the underlying SQL (that's `map:`,
+  // already applied to the real database by this migration).
+  @@unique([experimentId, statisticalMethodVersion, eligibilityLogicVersion, validityLogicVersion, dataCutoffAt], name: "calcIdentityKey", map: "experiment_measurement_results_calc_identity_key")
+  @@index([experimentId, generatedAt])
+  @@index([experimentId, resultKind])
+  @@index([resultStatus])
+  @@map("experiment_measurement_results")
 }
 
 // ---------------------------------------------------------------------------
