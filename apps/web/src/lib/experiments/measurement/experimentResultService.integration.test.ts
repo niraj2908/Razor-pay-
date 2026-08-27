@@ -51,6 +51,7 @@ async function makeMerchant() {
 async function makeExperiment(merchantId: string, treatmentAllocationPercent = 50) {
   const experiment = await prisma.experiment.create({
     data: {
+      merchantId,
       name: `Measurement orchestrator experiment ${TAG}-${randomUUID()}`,
       version: "v1",
       treatmentDefinition: "policy-v1",
@@ -61,7 +62,6 @@ async function makeExperiment(merchantId: string, treatmentAllocationPercent = 5
     },
   });
   createdExperimentIds.push(experiment.id);
-  void merchantId;
   return experiment;
 }
 

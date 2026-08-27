@@ -41,9 +41,10 @@ async function makeMerchant() {
  * call resolveExperimentAssignment and so cannot be hijacked by, or hijack,
  * that unrelated global "earliest RUNNING experiment" tie-break).
  */
-async function makeExperiment(status: "RUNNING" | "COMPLETED" = "COMPLETED") {
+async function makeExperiment(merchantId: string, status: "RUNNING" | "COMPLETED" = "COMPLETED") {
   const experiment = await prisma.experiment.create({
     data: {
+      merchantId,
       name: `Measurement persistence experiment ${TAG}-${randomUUID()}`,
       version: "v1",
       treatmentDefinition: "policy-v1",
@@ -129,7 +130,7 @@ async function makeCandidate(opts: {
  * separation clears a small (0.05) configured threshold easily, while still
  * being a completely ordinary, non-contaminated, fully mature dataset. */
 async function makeCleanEffectExperiment(merchant: { id: string }, status: "RUNNING" | "COMPLETED", n = 5) {
-  const experiment = await makeExperiment(status);
+  const experiment = await makeExperiment(merchant.id, status);
   // Each candidate's OWN chain of writes (payment -> assignment -> riskEvent
   // -> decision -> outcome) must stay sequential (FK dependencies), but
   // DIFFERENT candidates share no state and no unitKey, so they can be
@@ -163,7 +164,7 @@ async function makeCleanEffectExperiment(merchant: { id: string }, status: "RUNN
 }
 
 async function makeInsufficientDataExperiment(merchant: { id: string }) {
-  const experiment = await makeExperiment("COMPLETED");
+  const experiment = await makeExperiment(merchant.id, "COMPLETED");
   // Only one analyzable unit per arm, with a configured minimum of 5 -
   // structurally sound, just not enough volume.
   await makeCandidate({
@@ -184,7 +185,7 @@ async function makeInsufficientDataExperiment(merchant: { id: string }) {
 }
 
 async function makeInvalidExperiment(merchant: { id: string }) {
-  const experiment = await makeExperiment("COMPLETED");
+  const experiment = await makeExperiment(merchant.id, "COMPLETED");
   await makeCandidate({
     merchantId: merchant.id,
     arm: "TREATMENT",

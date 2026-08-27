@@ -186,8 +186,11 @@ describe("Outcome model", () => {
 
 describe("Experiment model", () => {
   it("3. creates a valid Experiment with correct defaults", async () => {
+    const merchant = await prisma.merchant.create({ data: { name: `Schema test merchant ${TAG}` } });
+    createdMerchantIds.push(merchant.id);
     const experiment = await prisma.experiment.create({
       data: {
+        merchantId: merchant.id,
         name: `Schema test experiment ${TAG}`,
         version: "v1",
         hypothesis: "Sending a Payment Link within 1 hour increases recovery.",
@@ -206,8 +209,10 @@ describe("Experiment model", () => {
 
 describe("ExperimentAssignment model", () => {
   it("4. creates a valid CONTROL assignment", async () => {
+    const { riskEventId, merchantId } = await makeCandidate();
     const experiment = await prisma.experiment.create({
       data: {
+        merchantId,
         name: `Schema test experiment ${TAG}`,
         version: "v1",
         treatmentDefinition: "policy-v1",
@@ -215,7 +220,6 @@ describe("ExperimentAssignment model", () => {
       },
     });
     createdExperimentIds.push(experiment.id);
-    const { riskEventId } = await makeCandidate();
 
     const assignment = await prisma.experimentAssignment.create({
       data: {
@@ -232,8 +236,10 @@ describe("ExperimentAssignment model", () => {
   });
 
   it("5. creates a valid TREATMENT assignment", async () => {
+    const { riskEventId, merchantId } = await makeCandidate();
     const experiment = await prisma.experiment.create({
       data: {
+        merchantId,
         name: `Schema test experiment ${TAG}`,
         version: "v1",
         treatmentDefinition: "policy-v1",
@@ -241,7 +247,6 @@ describe("ExperimentAssignment model", () => {
       },
     });
     createdExperimentIds.push(experiment.id);
-    const { riskEventId } = await makeCandidate();
 
     const assignment = await prisma.experimentAssignment.create({
       data: {
@@ -258,8 +263,10 @@ describe("ExperimentAssignment model", () => {
   });
 
   it("6. rejects a duplicate assignment for the same experiment+unit (real DB unique constraint, not check-then-insert)", async () => {
+    const { riskEventId, merchantId } = await makeCandidate();
     const experiment = await prisma.experiment.create({
       data: {
+        merchantId,
         name: `Schema test experiment ${TAG}`,
         version: "v1",
         treatmentDefinition: "policy-v1",
@@ -267,7 +274,6 @@ describe("ExperimentAssignment model", () => {
       },
     });
     createdExperimentIds.push(experiment.id);
-    const { riskEventId } = await makeCandidate();
 
     await prisma.experimentAssignment.create({
       data: {
@@ -295,8 +301,11 @@ describe("ExperimentAssignment model", () => {
   });
 
   it("a CUSTOMER-unit assignment can be reused across multiple recovery candidates", async () => {
+    const merchant = await prisma.merchant.create({ data: { name: `Schema test merchant ${TAG}` } });
+    createdMerchantIds.push(merchant.id);
     const experiment = await prisma.experiment.create({
       data: {
+        merchantId: merchant.id,
         name: `Schema test experiment ${TAG}`,
         version: "v1",
         treatmentDefinition: "policy-v1",
@@ -305,8 +314,6 @@ describe("ExperimentAssignment model", () => {
     });
     createdExperimentIds.push(experiment.id);
 
-    const merchant = await prisma.merchant.create({ data: { name: `Schema test merchant ${TAG}` } });
-    createdMerchantIds.push(merchant.id);
     const customer = await prisma.customer.create({
       data: { merchantId: merchant.id, razorpayCustomerId: `cust_${TAG}` },
     });

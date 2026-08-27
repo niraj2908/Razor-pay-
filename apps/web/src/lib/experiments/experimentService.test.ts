@@ -6,8 +6,8 @@ const mocks = vi.hoisted(() => {
   const assignments = new Map<string, Row>();
   let idCounter = 0;
 
-  const experimentFindFirst = vi.fn(async ({ where, orderBy }: { where: { status: string }; orderBy?: { startedAt: string } }) => {
-    const matches = [...experiments.values()].filter((e) => e.status === where.status);
+  const experimentFindFirst = vi.fn(async ({ where, orderBy }: { where: { status: string; merchantId: string }; orderBy?: { startedAt: string } }) => {
+    const matches = [...experiments.values()].filter((e) => e.status === where.status && e.merchantId === where.merchantId);
     if (matches.length === 0) return null;
     matches.sort((a, b) => {
       const aTime = a.startedAt ? (a.startedAt as Date).getTime() : Infinity;
@@ -82,15 +82,28 @@ const {
 } = await import("./experimentService");
 
 const NOW = new Date("2026-01-01T00:00:00.000Z");
+const MERCHANT_A = "merchant_a";
+const MERCHANT_B = "merchant_b";
 
 function runningExperiment(overrides: Record<string, unknown> = {}) {
   return {
     id: "exp_1",
+    merchantId: MERCHANT_A,
     status: "RUNNING",
     treatmentAllocationPercent: 100, // force TREATMENT deterministically for most tests
     startedAt: new Date("2025-12-01T00:00:00.000Z"),
     ...overrides,
   };
+}
+
+/** Every existing test call site defaults to MERCHANT_A, matching
+ * runningExperiment()'s default merchantId (Phase 25 Step 5). */
+function resolveFor(
+  input: { customerId: string | null; candidateKey: string; paymentState: string; merchantId?: string },
+  now = NOW
+) {
+  const { merchantId = MERCHANT_A, ...rest } = input;
+  return resolveExperimentAssignment({ ...rest, merchantId }, now);
 }
 
 describe("resolveExperimentAssignment", () => {
@@ -101,10 +114,7 @@ describe("resolveExperimentAssignment", () => {
 
   it("1. a RUNNING experiment assigns an eligible candidate", async () => {
     mocks.experiments.set("exp_1", runningExperiment());
-    const result = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" },
-      NOW
-    );
+    const result = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
     expect(result.outcome).toBe("assigned");
     if (result.outcome === "assigned") {
       expect(result.assignment.arm).toBe("TREATMENT");
@@ -114,44 +124,49 @@ describe("resolveExperimentAssignment", () => {
 
   it("2. a DRAFT experiment does not assign", async () => {
     mocks.experiments.set("exp_1", runningExperiment({ status: "DRAFT" }));
-    const result = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" },
-      NOW
-    );
+    const result = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
     expect(result).toEqual({ outcome: "no_running_experiment" });
     expect(mocks.assignmentCreate).not.toHaveBeenCalled();
   });
 
   it("3. a PAUSED experiment does not assign", async () => {
     mocks.experiments.set("exp_1", runningExperiment({ status: "PAUSED" }));
-    const result = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" },
-      NOW
-    );
+    const result = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
     expect(result).toEqual({ outcome: "no_running_experiment" });
     expect(mocks.assignmentCreate).not.toHaveBeenCalled();
   });
 
   it("4. a COMPLETED experiment does not assign", async () => {
     mocks.experiments.set("exp_1", runningExperiment({ status: "COMPLETED" }));
-    const result = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" },
-      NOW
-    );
+    const result = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
     expect(result).toEqual({ outcome: "no_running_experiment" });
     expect(mocks.assignmentCreate).not.toHaveBeenCalled();
   });
 
+  it("CRITICAL (Phase 25 Step 5): a RUNNING experiment belonging to a DIFFERENT merchant is never applicable to this candidate", async () => {
+    mocks.experiments.set("exp_1", runningExperiment({ merchantId: MERCHANT_B }));
+    const result = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED", merchantId: MERCHANT_A });
+    expect(result).toEqual({ outcome: "no_running_experiment" });
+    expect(mocks.assignmentCreate).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL (Phase 25 Step 5): each merchant is assigned into its OWN RUNNING experiment, never the other's, when both are running concurrently", async () => {
+    mocks.experiments.set("exp_a", runningExperiment({ id: "exp_a", merchantId: MERCHANT_A }));
+    mocks.experiments.set("exp_b", runningExperiment({ id: "exp_b", merchantId: MERCHANT_B, startedAt: new Date("2025-11-01T00:00:00.000Z") }));
+
+    const resultA = await resolveFor({ customerId: "cust_a", candidateKey: "risk_a", paymentState: "FAILED", merchantId: MERCHANT_A });
+    const resultB = await resolveFor({ customerId: "cust_b", candidateKey: "risk_b", paymentState: "FAILED", merchantId: MERCHANT_B });
+
+    expect(resultA.outcome).toBe("assigned");
+    expect(resultB.outcome).toBe("assigned");
+    if (resultA.outcome === "assigned") expect(resultA.assignment.experimentId).toBe("exp_a");
+    if (resultB.outcome === "assigned") expect(resultB.assignment.experimentId).toBe("exp_b");
+  });
+
   it("9. a duplicate assignment request for the same participant reuses the existing row (no second insert)", async () => {
     mocks.experiments.set("exp_1", runningExperiment());
-    const first = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" },
-      NOW
-    );
-    const second = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_2", paymentState: "FAILED" },
-      NOW
-    );
+    const first = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
+    const second = await resolveFor({ customerId: "cust_1", candidateKey: "risk_2", paymentState: "FAILED" });
     expect(first.outcome).toBe("assigned");
     expect(second.outcome).toBe("assigned");
     if (first.outcome === "assigned" && second.outcome === "assigned") {
@@ -162,18 +177,9 @@ describe("resolveExperimentAssignment", () => {
 
   it("11. a CUSTOMER-level assignment is reused across multiple candidates for the same customer", async () => {
     mocks.experiments.set("exp_1", runningExperiment());
-    const candidate1 = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" },
-      NOW
-    );
-    const candidate2 = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_2", paymentState: "FAILED" },
-      NOW
-    );
-    const candidate3 = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_3", paymentState: "FAILED" },
-      NOW
-    );
+    const candidate1 = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
+    const candidate2 = await resolveFor({ customerId: "cust_1", candidateKey: "risk_2", paymentState: "FAILED" });
+    const candidate3 = await resolveFor({ customerId: "cust_1", candidateKey: "risk_3", paymentState: "FAILED" });
     for (const r of [candidate1, candidate2, candidate3]) {
       expect(r.outcome).toBe("assigned");
       if (r.outcome === "assigned") expect(r.assignment.arm).toBe("TREATMENT");
@@ -182,10 +188,7 @@ describe("resolveExperimentAssignment", () => {
 
   it("12. a guest candidate (no customerId) uses the CANDIDATE-level fallback", async () => {
     mocks.experiments.set("exp_1", runningExperiment());
-    const result = await resolveExperimentAssignment(
-      { customerId: null, candidateKey: "risk_guest_1", paymentState: "FAILED" },
-      NOW
-    );
+    const result = await resolveFor({ customerId: null, candidateKey: "risk_guest_1", paymentState: "FAILED" });
     expect(result.outcome).toBe("assigned");
     if (result.outcome === "assigned") {
       expect(result.assignment.unitType).toBe("CANDIDATE");
@@ -195,17 +198,14 @@ describe("resolveExperimentAssignment", () => {
 
   it("18. an ineligible candidate (payment already captured) receives no assignment at all - never forced into CONTROL", async () => {
     mocks.experiments.set("exp_1", runningExperiment());
-    const result = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "CAPTURED" },
-      NOW
-    );
+    const result = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "CAPTURED" });
     expect(result).toEqual({ outcome: "ineligible", reasons: ["payment_state_ineligible:CAPTURED"] });
     expect(mocks.assignmentCreate).not.toHaveBeenCalled();
   });
 
   it("19. the assignment algorithm/version is persisted on every new assignment", async () => {
     mocks.experiments.set("exp_1", runningExperiment());
-    await resolveExperimentAssignment({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" }, NOW);
+    await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
     const created = [...mocks.assignments.values()][0];
     expect(created.assignmentAlgorithm).toBe("sha256-v1");
     expect(created.eligibilityVersion).toBe("eligibility-v1");
@@ -220,17 +220,14 @@ describe("resolveExperimentAssignment", () => {
       unitKey: "cust_1",
       arm: "TREATMENT",
     });
-    const result = await resolveExperimentAssignment(
-      { customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" },
-      NOW
-    );
+    const result = await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
     expect(result).toEqual({ outcome: "excluded_overlap", existingExperimentId: "exp_other" });
     expect(mocks.assignmentCreate).not.toHaveBeenCalled();
   });
 
   it("assignedAt is set explicitly from the passed-in `now`, not an implicit DB default", async () => {
     mocks.experiments.set("exp_1", runningExperiment());
-    await resolveExperimentAssignment({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" }, NOW);
+    await resolveFor({ customerId: "cust_1", candidateKey: "risk_1", paymentState: "FAILED" });
     const created = [...mocks.assignments.values()][0];
     expect(created.assignedAt).toBe(NOW);
   });

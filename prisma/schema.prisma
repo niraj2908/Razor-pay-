@@ -115,6 +115,7 @@ model Merchant {
   networkEvents    NetworkEvent[]
   auditEvents      AuditEvent[]
   operators        Operator[]
+  experiments      Experiment[]
 
   @@map("merchants")
 }
@@ -432,8 +433,26 @@ enum ExperimentStatus {
   COMPLETED
 }
 
+// Phase 25 Step 5: per-merchant experiment scope, resolved as an explicit
+// product decision (not silently invented - see the Phase 25 Step 1/2B/4
+// audits that repeatedly flagged and deferred this). Each Experiment
+// belongs to exactly ONE Merchant, mirroring the Operator model (Phase 25
+// Step 2B). This is what makes every ExperimentMeasurementResult row
+// (always computed per single experimentId - see resultStatus.ts/
+// experimentMeasurementResultService.ts, both UNCHANGED by this step)
+// inherently single-merchant, with zero changes to the measurement/
+// statistics pipeline itself: since an experiment now belongs to one
+// merchant, ANY measurement result for it is automatically "that
+// merchant's" result - no new aggregation dimension was needed.
+//
+// A schema field alone does not enforce this - experimentService.ts's
+// `findApplicableRunningExperiment` is updated in this same step to filter
+// candidate RUNNING experiments by the candidate's own merchant, so a
+// merchant A candidate can never be assigned into a merchant B experiment.
+// Without that companion change, `merchantId` would be inert metadata.
 model Experiment {
   id          String           @id @default(cuid())
+  merchantId  String
   name        String
   version     String           // e.g. "v1" - same versioning convention as modelVersion/policyVersion
   hypothesis  String?          // what we expect and why, distinct from a general description
@@ -464,10 +483,12 @@ model Experiment {
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
 
+  merchant    Merchant                      @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   assignments ExperimentAssignment[]
   results     ExperimentResult[]
   measurementResults ExperimentMeasurementResult[]
 
+  @@index([merchantId])
   @@map("experiments")
 }
 

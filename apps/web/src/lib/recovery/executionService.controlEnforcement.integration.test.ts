@@ -50,6 +50,7 @@ async function makeCandidate(arm: "CONTROL" | "TREATMENT" | null) {
   if (arm) {
     const experiment = await prisma.experiment.create({
       data: {
+        merchantId: merchant.id,
         name: `Control enforcement experiment ${TAG}`,
         version: "v1",
         treatmentDefinition: "policy-v1",

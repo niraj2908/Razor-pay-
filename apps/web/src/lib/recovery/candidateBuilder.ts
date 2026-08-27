@@ -129,6 +129,7 @@ export async function buildRecoveryCandidateFromPaymentEvent(
     customerId: payment.customerId,
     candidateKey: revenueRiskEventId,
     paymentState: payment.status,
+    merchantId: payment.merchantId,
   });
   const experimentAssignmentId =
     experimentResolution.outcome === "assigned" ? experimentResolution.assignment.id : null;

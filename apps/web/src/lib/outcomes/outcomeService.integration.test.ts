@@ -136,6 +136,7 @@ describe("processOutcomeAttributionForPaymentEvent against a real database", () 
     const candidate = await makeCandidate("CAPTURED");
     const experiment = await prisma.experiment.create({
       data: {
+        merchantId: candidate.merchantId,
         name: `Outcome test experiment ${TAG}`,
         version: "v1",
         treatmentDefinition: "policy-v1",

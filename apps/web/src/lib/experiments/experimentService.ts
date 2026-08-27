@@ -111,18 +111,25 @@ export function isExecutionAllowed(resolution: ExperimentAssignmentResolution): 
   return true;
 }
 
-async function findApplicableRunningExperiment(): Promise<{
+async function findApplicableRunningExperiment(merchantId: string): Promise<{
   id: string;
   treatmentAllocationPercent: number;
 } | null> {
   // V1 overlap policy (Section 14): if more than one experiment is
-  // RUNNING at once, only the earliest-started one accepts new
-  // assignments - a simple, explicit, deterministic tie-break rather than
-  // building multi-experiment orchestration. This is a documented
-  // limitation (see the Phase 23 Step 5 final report), not automatic
-  // support for concurrent experiments.
+  // RUNNING at once FOR THIS MERCHANT, only the earliest-started one
+  // accepts new assignments - a simple, explicit, deterministic tie-break
+  // rather than building multi-experiment orchestration. This is a
+  // documented limitation (see the Phase 23 Step 5 final report), not
+  // automatic support for concurrent experiments.
+  //
+  // Phase 25 Step 5: the `merchantId` filter here is what actually makes
+  // Experiment.merchantId (schema) mean something - without it, a
+  // per-merchant Experiment field would be inert metadata that a candidate
+  // from any merchant could still be assigned across. This is the specific
+  // change the Phase 25 Step 1/2B/4 audits identified as the real fix,
+  // distinct from and in addition to the schema column itself.
   const experiment = await prisma.experiment.findFirst({
-    where: { status: "RUNNING" },
+    where: { status: "RUNNING", merchantId },
     orderBy: { startedAt: "asc" },
   });
   if (!experiment) {
@@ -189,12 +196,17 @@ async function persistAssignment(
  * candidate's own RevenueRiskEvent id) - callers must pre-generate this id
  * before the RevenueRiskEvent row exists, since assignment must complete
  * first (see candidateBuilder.ts).
+ *
+ * `merchantId` (Phase 25 Step 5) is the candidate's OWN merchant (the
+ * Payment's merchantId) - it restricts which RUNNING experiment can even
+ * be considered to ones belonging to that same merchant, so a candidate
+ * can never be pulled into another merchant's experiment.
  */
 export async function resolveExperimentAssignment(
-  input: { customerId: string | null; candidateKey: string; paymentState: string },
+  input: { customerId: string | null; candidateKey: string; paymentState: string; merchantId: string },
   now: Date = new Date()
 ): Promise<ExperimentAssignmentResolution> {
-  const experiment = await findApplicableRunningExperiment();
+  const experiment = await findApplicableRunningExperiment(input.merchantId);
   if (!experiment) {
     return { outcome: "no_running_experiment" };
   }
