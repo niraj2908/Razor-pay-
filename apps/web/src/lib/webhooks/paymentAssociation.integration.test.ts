@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/db";
 import { associatePaymentEvent } from "./paymentAssociation";
 
@@ -229,6 +229,144 @@ describe("associatePaymentEvent against a real database", () => {
       });
       await associatePaymentEvent(capturedEvent.id);
       expect((await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } })).status).toBe("CAPTURED");
+    },
+    20_000
+  );
+});
+
+/**
+ * Real-database integration tests for Phase 25's new-Payment-creation path
+ * inside associateExistingPayment/findOrCreatePayment (payment.authorized/
+ * failed/captured/order.paid, when no matching Payment exists yet). The
+ * critical claim under test - that a brand-new Payment is created under
+ * exactly the RAZORPAY_MERCHANT_ID-configured Merchant and NEVER any other
+ * real Merchant, even when one exists - can only be proven against a real
+ * database with two genuinely distinct Merchant rows; a mocked Prisma
+ * client only proves our own code reacts correctly to a simulated row.
+ */
+describe("associatePaymentEvent - new Payment creation against a real database", () => {
+  const originalValue = process.env.RAZORPAY_MERCHANT_ID;
+  const createdForCreationTests: string[] = [];
+  const createdPaymentEventIds: string[] = [];
+
+  function newPaymentEnvelope(razorpayPaymentId: string, amount: number, status = "captured") {
+    return { event: "payment.captured", payload: { payment: { entity: { id: razorpayPaymentId, amount, currency: "INR", status } } } };
+  }
+
+  beforeEach(() => {
+    delete process.env.RAZORPAY_MERCHANT_ID;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    if (originalValue === undefined) {
+      delete process.env.RAZORPAY_MERCHANT_ID;
+    } else {
+      process.env.RAZORPAY_MERCHANT_ID = originalValue;
+    }
+  });
+
+  afterAll(async () => {
+    // Explicit by-id cleanup (not just "events attached to these merchants'
+    // payments") - the fail-closed test's PaymentEvent is deliberately NEVER
+    // associated to any Payment, so it would otherwise be orphaned here.
+    await prisma.paymentEvent.deleteMany({ where: { id: { in: createdPaymentEventIds } } });
+    await prisma.payment.deleteMany({ where: { merchantId: { in: createdForCreationTests } } });
+    await prisma.merchant.deleteMany({ where: { id: { in: createdForCreationTests } } });
+    await prisma.$disconnect();
+  });
+
+  it(
+    "creates a new Payment under the configured Merchant, and never under a second real Merchant that also exists",
+    async () => {
+      const configuredMerchant = await prisma.merchant.create({ data: { name: `Creation test configured merchant ${TAG}` } });
+      const otherMerchant = await prisma.merchant.create({ data: { name: `Creation test OTHER merchant ${TAG}` } });
+      createdForCreationTests.push(configuredMerchant.id, otherMerchant.id);
+      process.env.RAZORPAY_MERCHANT_ID = configuredMerchant.id;
+
+      const razorpayPaymentId = `pay_${randomUUID().slice(0, 12)}`;
+      const paymentEvent = await prisma.paymentEvent.create({
+        data: {
+          razorpayEventId: `${TAG}-new-payment`,
+          eventType: "payment.captured",
+          payload: newPaymentEnvelope(razorpayPaymentId, 15000),
+        },
+      });
+      createdPaymentEventIds.push(paymentEvent.id);
+
+      const result = await associatePaymentEvent(paymentEvent.id);
+
+      expect(result.status).toBe("associated_new_payment");
+      const created = await prisma.payment.findUniqueOrThrow({ where: { razorpayPaymentId } });
+      expect(created.merchantId).toBe(configuredMerchant.id);
+      expect(created.merchantId).not.toBe(otherMerchant.id);
+      expect(created.amount).toBe(15000);
+      expect(created.status).toBe("CAPTURED");
+
+      const finalEvent = await prisma.paymentEvent.findUniqueOrThrow({ where: { id: paymentEvent.id } });
+      expect(finalEvent.paymentId).toBe(created.id);
+    },
+    20_000
+  );
+
+  it(
+    "fails closed - creates NO Payment at all - when RAZORPAY_MERCHANT_ID is unset, even though a real Merchant exists",
+    async () => {
+      const merchant = await prisma.merchant.create({ data: { name: `Creation test unconfigured merchant ${TAG}` } });
+      createdForCreationTests.push(merchant.id);
+      // RAZORPAY_MERCHANT_ID deliberately left unset by beforeEach.
+
+      const razorpayPaymentId = `pay_${randomUUID().slice(0, 12)}`;
+      const paymentEvent = await prisma.paymentEvent.create({
+        data: {
+          razorpayEventId: `${TAG}-no-merchant-configured`,
+          eventType: "payment.captured",
+          payload: newPaymentEnvelope(razorpayPaymentId, 15000),
+        },
+      });
+      createdPaymentEventIds.push(paymentEvent.id);
+
+      const result = await associatePaymentEvent(paymentEvent.id);
+
+      expect(result).toEqual({ status: "unassociated", reason: "merchant_not_configured" });
+      const shouldNotExist = await prisma.payment.findUnique({ where: { razorpayPaymentId } });
+      expect(shouldNotExist).toBeNull();
+    },
+    20_000
+  );
+
+  it(
+    "5 concurrent deliveries of the same brand-new razorpayPaymentId converge on exactly one real Payment row",
+    async () => {
+      const merchant = await prisma.merchant.create({ data: { name: `Creation test concurrency merchant ${TAG}` } });
+      createdForCreationTests.push(merchant.id);
+      process.env.RAZORPAY_MERCHANT_ID = merchant.id;
+
+      const razorpayPaymentId = `pay_${randomUUID().slice(0, 12)}`;
+      // Real, distinct PaymentEvent rows (not 5 calls on one event) - this
+      // proves the real Payment.razorpayPaymentId unique constraint itself
+      // prevents a duplicate, independent of PaymentEvent-level idempotency.
+      const events = await Promise.all(
+        Array.from({ length: 5 }, (_, i) =>
+          prisma.paymentEvent.create({
+            data: {
+              razorpayEventId: `${TAG}-concurrent-new-${i}`,
+              eventType: "payment.captured",
+              payload: newPaymentEnvelope(razorpayPaymentId, 20000),
+            },
+          })
+        )
+      );
+      createdPaymentEventIds.push(...events.map((e) => e.id));
+
+      const results = await Promise.all(events.map((e) => associatePaymentEvent(e.id)));
+
+      for (const result of results) {
+        expect(["associated_new_payment", "associated_existing"]).toContain(result.status);
+      }
+      const matchingPayments = await prisma.payment.findMany({ where: { razorpayPaymentId } });
+      expect(matchingPayments).toHaveLength(1); // exactly one - no duplicate despite 5 concurrent creators
+      expect(matchingPayments[0].merchantId).toBe(merchant.id);
     },
     20_000
   );

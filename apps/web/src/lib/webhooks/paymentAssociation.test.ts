@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const resolveConfiguredMerchant = vi.fn();
+vi.mock("./merchantResolution", () => ({ resolveConfiguredMerchant }));
+
 const mocks = vi.hoisted(() => {
   const paymentEvents = new Map<string, { id: string; eventType: string; payload: unknown; paymentId: string | null }>();
   const payments = new Map<string, { id: string; razorpayPaymentId: string | null; status: string; merchantId: string }>();
@@ -109,6 +112,7 @@ describe("associatePaymentEvent", () => {
   beforeEach(() => {
     mocks.reset();
     vi.clearAllMocks();
+    resolveConfiguredMerchant.mockResolvedValue({ status: "resolved", merchantId: "merchant_configured" });
   });
 
   it("skips a PaymentEvent that does not exist", async () => {
@@ -193,7 +197,26 @@ describe("associatePaymentEvent", () => {
     expect(mocks.paymentFindUnique).not.toHaveBeenCalled();
   });
 
-  it("leaves an event unassociated when no existing Payment matches", async () => {
+  it("creates a NEW Payment for a genuinely unseen razorpayPaymentId when the configured Merchant, amount, and status are all resolvable", async () => {
+    mocks.paymentEvents.set("evt_new", {
+      id: "evt_new",
+      eventType: "payment.failed",
+      paymentId: null,
+      payload: razorpayEnvelope("payment.failed", {
+        payload: { payment: { entity: { id: "pay_brand_new", amount: 25000, currency: "INR", method: "upi", status: "failed" } } },
+      }),
+    });
+
+    const result = await associatePaymentEvent("evt_new");
+
+    expect(result.status).toBe("associated_new_payment");
+    const created = [...mocks.payments.values()].find((p) => p.razorpayPaymentId === "pay_brand_new");
+    expect(created).toMatchObject({ merchantId: "merchant_configured", status: "FAILED" });
+    expect(mocks.paymentEvents.get("evt_new")?.paymentId).toBe(created?.id);
+    expect(resolveConfiguredMerchant).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed (never creates a Payment) when the payload has no amount for a genuinely unseen razorpayPaymentId", async () => {
     mocks.paymentEvents.set("evt_orphan", {
       id: "evt_orphan",
       eventType: "payment.failed",
@@ -205,7 +228,98 @@ describe("associatePaymentEvent", () => {
 
     const result = await associatePaymentEvent("evt_orphan");
 
-    expect(result).toEqual({ status: "unassociated", reason: "no_existing_payment_found" });
+    expect(result).toEqual({ status: "unassociated", reason: "missing_amount_for_payment_creation" });
+    expect(mocks.paymentCreate).not.toHaveBeenCalled();
+    expect(resolveConfiguredMerchant).not.toHaveBeenCalled(); // never even reaches merchant resolution without an amount
+  });
+
+  it("fails closed (never creates a Payment) when the incoming status is missing or unrecognized", async () => {
+    mocks.paymentEvents.set("evt_bad_status", {
+      id: "evt_bad_status",
+      eventType: "payment.failed",
+      paymentId: null,
+      payload: razorpayEnvelope("payment.failed", {
+        payload: { payment: { entity: { id: "pay_new_bad_status", amount: 5000, status: "some_future_razorpay_status" } } },
+      }),
+    });
+
+    const result = await associatePaymentEvent("evt_bad_status");
+
+    expect(result).toEqual({ status: "unassociated", reason: "missing_or_unrecognized_status_for_payment_creation" });
+    expect(mocks.paymentCreate).not.toHaveBeenCalled();
+    expect(resolveConfiguredMerchant).not.toHaveBeenCalled();
+  });
+
+  it("fails closed (never creates a Payment) when no Merchant is configured (RAZORPAY_MERCHANT_ID unset)", async () => {
+    resolveConfiguredMerchant.mockResolvedValue({ status: "not_configured" });
+    mocks.paymentEvents.set("evt_no_merchant", {
+      id: "evt_no_merchant",
+      eventType: "payment.captured",
+      paymentId: null,
+      payload: razorpayEnvelope("payment.captured", {
+        payload: { payment: { entity: { id: "pay_new_no_merchant", amount: 5000, status: "captured" } } },
+      }),
+    });
+
+    const result = await associatePaymentEvent("evt_no_merchant");
+
+    expect(result).toEqual({ status: "unassociated", reason: "merchant_not_configured" });
+    expect(mocks.paymentCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed (never creates a Payment) when the configured Merchant id does not resolve to a real row - never falls back to any other Merchant", async () => {
+    resolveConfiguredMerchant.mockResolvedValue({ status: "unresolvable" });
+    mocks.paymentEvents.set("evt_bad_merchant", {
+      id: "evt_bad_merchant",
+      eventType: "payment.captured",
+      paymentId: null,
+      payload: razorpayEnvelope("payment.captured", {
+        payload: { payment: { entity: { id: "pay_new_bad_merchant", amount: 5000, status: "captured" } } },
+      }),
+    });
+
+    const result = await associatePaymentEvent("evt_bad_merchant");
+
+    expect(result).toEqual({ status: "unassociated", reason: "merchant_unresolvable" });
+    expect(mocks.paymentCreate).not.toHaveBeenCalled();
+  });
+
+  it("converges on exactly one Payment when a concurrent delivery already created the same razorpayPaymentId first (P2002 idempotent creation)", async () => {
+    // Simulates the race: paymentCreate throws P2002 as if another
+    // concurrent call already inserted this exact razorpayPaymentId, so
+    // this attempt must fetch and use that row rather than throwing or
+    // creating a duplicate.
+    mocks.payments.set("payment_race_winner", {
+      id: "payment_race_winner",
+      razorpayPaymentId: "pay_race",
+      status: "AUTHORIZED",
+      merchantId: "merchant_configured",
+    });
+    // Our own findUnique ran before the concurrent winner's insert - return
+    // null just this once, even though the row already exists in the map
+    // (the winner already committed) by the time our own create() call
+    // races against it below.
+    mocks.paymentFindUnique.mockResolvedValueOnce(null);
+    mocks.paymentCreate.mockImplementationOnce(async () => {
+      const error = new Error("Unique constraint failed on the fields: (`razorpayPaymentId`)") as Error & { code: string };
+      error.code = "P2002";
+      throw error;
+    });
+
+    mocks.paymentEvents.set("evt_race", {
+      id: "evt_race",
+      eventType: "payment.captured",
+      paymentId: null,
+      payload: razorpayEnvelope("payment.captured", {
+        payload: { payment: { entity: { id: "pay_race", amount: 5000, status: "captured" } } },
+      }),
+    });
+
+    const result = await associatePaymentEvent("evt_race");
+
+    expect(result).toEqual({ status: "associated_existing", paymentId: "payment_race_winner" });
+    expect(mocks.payments.size).toBe(1); // no duplicate Payment created
+    expect(mocks.payments.get("payment_race_winner")?.status).toBe("CAPTURED"); // status still correctly advances
   });
 
   it("leaves payment_link.paid unassociated when no Execution matches the payment link id", async () => {
