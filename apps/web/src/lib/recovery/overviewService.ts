@@ -5,8 +5,11 @@ import { prisma } from "@/lib/db";
  *
  * A read-only aggregation over EXISTING domain tables
  * (RevenueRiskEvent/Payment/Execution/Outcome) - contains NO decision
- * logic, NO economics, NO statistics, and NEVER computes or estimates an
- * incremental/causal effect. `merchantId` MUST already be the caller's own
+ * logic, NO economics, NO statistics, and NEVER itself computes or
+ * estimates an incremental/causal effect (see `computeIncrementalRecovery`
+ * below - it only reads and honors an already-computed, already-validated
+ * `ExperimentMeasurementResult`, never derives one). `merchantId` MUST
+ * already be the caller's own
  * authorized merchant (see recoveryQueueService.ts/decisionDetailService.ts
  * for the identical trust contract) - this function applies it directly in
  * every query's WHERE clause, never fetch-then-filter.
@@ -24,11 +27,21 @@ import { prisma } from "@/lib/db";
  *     (and this step does not touch) the upstream duplicate-creation
  *     behavior in candidateBuilder.ts.
  *
- * Incremental/causal GMV is UNCONDITIONALLY unavailable - Experiment/
- * ExperimentAssignment/ExperimentMeasurementResult have no merchant
- * boundary at all (Phase 25 Step 1 audit), so no query, however
- * authorized, can safely attribute a share of any measurement result to
- * one merchant. This is never computed, estimated, or approximated here.
+ * Incremental/causal GMV (`incrementalRecovery`) is computed conservatively,
+ * not unconditionally unavailable: Phase 25 Step 5 gave Experiment a real
+ * merchant boundary, so `computeIncrementalRecovery` below CAN now safely
+ * scope a measurement result to this merchant. It only ever reports
+ * `available` when the merchant has exactly one experiment whose latest
+ * measurement result is `VALID_EFFECT` with real, non-null persisted
+ * estimate fields - the exact same condition
+ * `experimentQueryService.ts`'s `mapIncrementalEstimate` already enforces
+ * for the Experiment Results API, never duplicated or relaxed here. It
+ * NEVER computes, estimates, or approximates a number itself, never treats
+ * `observedDifference` as causal, and NEVER picks a value when a merchant
+ * has more than one experiment with its own VALID_EFFECT result - that
+ * "which one counts" aggregation question remains a genuine, unresolved
+ * product decision (flagged repeatedly since Step 4), so it is reported as
+ * unavailable rather than guessed.
  */
 
 // 366 days - a deliberate, documented cap on an explicit (since AND until)
@@ -98,8 +111,15 @@ export type RecoveryOverviewResult = {
     interventionRecoveryGmvPaise: number;
     observedRecoveryRate: number | null;
   };
-  incrementalRecovery: { status: "unavailable"; reason: "experiment_merchant_isolation_not_implemented" };
+  incrementalRecovery: IncrementalRecoveryResult;
 };
+
+export type IncrementalRecoveryResult =
+  | {
+      status: "unavailable";
+      reason: "no_experiment_configured" | "no_valid_effect_result" | "ambiguous_multiple_valid_effect_experiments";
+    }
+  | { status: "available"; estimatedIncrementalGMVPaise: number; estimatedCounterfactualTreatmentGMVPaise: number };
 
 /** Sums `amountPaise` once per distinct `paymentId` - the core anti-double-
  * counting rule (see this module's doc comment). Rows sharing a paymentId
@@ -115,6 +135,76 @@ function sumDistinctByPayment(rows: Array<{ paymentId: string; amountPaise: numb
     total += row.amountPaise;
   }
   return total;
+}
+
+/**
+ * Determines whether this merchant currently has a safe, honest
+ * incremental-GMV figure to report (Phase 25 backend-gap audit, Fix #2).
+ *
+ * Deliberately conservative:
+ *   - No `Experiment` row for this merchant at all -> `no_experiment_configured`.
+ *   - This merchant has experiment(s), but none of their LATEST measurement
+ *     results is `VALID_EFFECT` with real (non-null) persisted estimate
+ *     fields -> `no_valid_effect_result`. This single reason covers
+ *     VALID_INCONCLUSIVE, INVALID, INSUFFICIENT_DATA, no result ever
+ *     computed, and a VALID_EFFECT row with unexpectedly-null estimate
+ *     fields - every one of those is honestly "no valid effect to report,"
+ *     never fabricated into a number.
+ *   - More than one experiment's latest result is independently
+ *     `VALID_EFFECT` -> `ambiguous_multiple_valid_effect_experiments`.
+ *     Picking one arbitrarily (e.g. "the newest") would be inventing an
+ *     aggregation rule nobody has approved - reported as unavailable
+ *     instead of guessed.
+ *   - Exactly one qualifying experiment -> `available`, with that
+ *     experiment's own persisted paise values, verbatim - never recomputed,
+ *     never derived from `observedDifference` (never read here at all).
+ *
+ * "Latest" per experiment uses the same `ORDER BY generatedAt DESC`
+ * convention already established in experimentQueryService.ts - `distinct`
+ * combined with that `orderBy` gives Postgres's `DISTINCT ON` semantics
+ * (one row per experimentId, the most recently generated one), in a single
+ * query with no N+1.
+ */
+async function computeIncrementalRecovery(merchantId: string): Promise<IncrementalRecoveryResult> {
+  const experiments = await prisma.experiment.findMany({
+    where: { merchantId },
+    select: { id: true },
+  });
+  if (experiments.length === 0) {
+    return { status: "unavailable", reason: "no_experiment_configured" };
+  }
+
+  const latestPerExperiment = await prisma.experimentMeasurementResult.findMany({
+    where: { experimentId: { in: experiments.map((e) => e.id) } },
+    orderBy: { generatedAt: "desc" },
+    distinct: ["experimentId"],
+    select: {
+      resultStatus: true,
+      estimatedIncrementalGMVPaise: true,
+      estimatedCounterfactualTreatmentGMVPaise: true,
+    },
+  });
+
+  const validEffectResults = latestPerExperiment.filter(
+    (r) =>
+      r.resultStatus === "VALID_EFFECT" &&
+      r.estimatedIncrementalGMVPaise !== null &&
+      r.estimatedCounterfactualTreatmentGMVPaise !== null
+  );
+
+  if (validEffectResults.length === 0) {
+    return { status: "unavailable", reason: "no_valid_effect_result" };
+  }
+  if (validEffectResults.length > 1) {
+    return { status: "unavailable", reason: "ambiguous_multiple_valid_effect_experiments" };
+  }
+
+  const result = validEffectResults[0];
+  return {
+    status: "available",
+    estimatedIncrementalGMVPaise: result.estimatedIncrementalGMVPaise as number,
+    estimatedCounterfactualTreatmentGMVPaise: result.estimatedCounterfactualTreatmentGMVPaise as number,
+  };
 }
 
 /**
@@ -134,7 +224,7 @@ function sumDistinctByPayment(rows: Array<{ paymentId: string; amountPaise: numb
 export async function getRecoveryOverview(merchantId: string, query: RecoveryOverviewQuery): Promise<RecoveryOverviewResult> {
   const until = query.until ?? new Date();
 
-  const [openRiskEvents, candidatesCount, executionsByStatus, outcomes] = await Promise.all([
+  const [openRiskEvents, candidatesCount, executionsByStatus, outcomes, incrementalRecovery] = await Promise.all([
     prisma.revenueRiskEvent.findMany({
       where: { merchantId, resolvedAt: null },
       distinct: ["paymentId"],
@@ -159,6 +249,7 @@ export async function getRecoveryOverview(merchantId: string, query: RecoveryOve
       },
       select: { paymentId: true, status: true, attributionStatus: true, recoveredAmount: true },
     }),
+    computeIncrementalRecovery(merchantId),
   ]);
 
   const revenueAtRiskPaise = sumDistinctByPayment(
@@ -199,10 +290,6 @@ export async function getRecoveryOverview(merchantId: string, query: RecoveryOve
       interventionRecoveryGmvPaise,
       observedRecoveryRate: matureOutcomesCount > 0 ? recoveredCount / matureOutcomesCount : null,
     },
-    // Unconditional - see this module's doc comment. Never computed from
-    // ExperimentMeasurementResult here, regardless of what exists in the
-    // database, because that table has no merchant boundary to safely
-    // filter by (Phase 25 Step 1 audit finding, reaffirmed in Step 4).
-    incrementalRecovery: { status: "unavailable", reason: "experiment_merchant_isolation_not_implemented" },
+    incrementalRecovery,
   };
 }

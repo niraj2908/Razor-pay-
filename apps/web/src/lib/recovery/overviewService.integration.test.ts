@@ -73,7 +73,64 @@ async function makeOutcome(opts: {
   });
 }
 
+const createdExperimentIds: string[] = [];
+
+async function makeExperiment(merchantId: string) {
+  const experiment = await prisma.experiment.create({
+    data: {
+      merchantId,
+      name: `Overview incrementalRecovery test experiment ${TAG}-${randomUUID()}`,
+      version: "v1",
+      treatmentDefinition: "policy-v1",
+      treatmentAllocationPercent: 50,
+      status: "COMPLETED",
+    },
+  });
+  createdExperimentIds.push(experiment.id);
+  return experiment;
+}
+
+function baseMeasurementResultData(experimentId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    experimentId,
+    version: 1,
+    resultKind: "FINAL" as const,
+    resultStatus: "VALID_EFFECT" as const,
+    calculatedAt: new Date(),
+    dataCutoffAt: new Date(),
+    statisticalMethodVersion: "statistics-v1",
+    eligibilityLogicVersion: "eligibility-v1",
+    validityLogicVersion: "validity-v1",
+    confidenceLevel: 0.95,
+    totalAssignments: 200,
+    treatmentAnalyzableUnits: 100,
+    treatmentSuccessUnits: 40,
+    treatmentRecoveredGMVPaise: 400000,
+    controlAnalyzableUnits: 100,
+    controlSuccessUnits: 20,
+    controlRecoveredGMVPaise: 200000,
+    observedDifference: 0.2,
+    observedDifferenceLower: 0.05,
+    observedDifferenceUpper: 0.35,
+    estimatedCounterfactualTreatmentGMVPaise: 200000,
+    estimatedIncrementalGMVPaise: 200000,
+    treatmentUnknownOnlyUnits: 0,
+    controlUnknownOnlyUnits: 0,
+    excludedUnitsTotal: 0,
+    exclusionReasonCounts: {},
+    validityChecks: [],
+    ...overrides,
+  };
+}
+
+async function makeMeasurementResult(experimentId: string, overrides: Record<string, unknown> = {}) {
+  return prisma.experimentMeasurementResult.create({ data: baseMeasurementResultData(experimentId, overrides) });
+}
+
 afterAll(async () => {
+  await prisma.experimentMeasurementResult.deleteMany({ where: { experimentId: { in: createdExperimentIds } } });
+  await prisma.experimentAssignment.deleteMany({ where: { experimentId: { in: createdExperimentIds } } });
+  await prisma.experiment.deleteMany({ where: { id: { in: createdExperimentIds } } });
   await prisma.outcome.deleteMany({ where: { payment: { merchantId: { in: createdMerchantIds } } } });
   await prisma.execution.deleteMany({ where: { payment: { merchantId: { in: createdMerchantIds } } } });
   await prisma.decision.deleteMany({ where: { revenueRiskEvent: { merchantId: { in: createdMerchantIds } } } });
@@ -90,7 +147,7 @@ describe("getRecoveryOverview against a real database", () => {
     expect(result.operational).toEqual({ candidatesCount: 0, revenueAtRiskPaise: 0, interventionsAttempted: 0, interventionsSucceeded: 0 });
     expect(result.attributedOutcomes.matureOutcomesCount).toBe(0);
     expect(result.attributedOutcomes.observedRecoveryRate).toBeNull();
-    expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "experiment_merchant_isolation_not_implemented" });
+    expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "no_experiment_configured" });
   }, 30_000);
 
   it("CRITICAL: cross-merchant aggregate isolation - Merchant A's overview never reflects Merchant B's real data", async () => {
@@ -242,4 +299,58 @@ describe("getRecoveryOverview against a real database", () => {
     expect(result.operational.revenueAtRiskPaise).toBe(123456789);
     expect(Number.isInteger(result.operational.revenueAtRiskPaise)).toBe(true);
   }, 30_000);
+
+  describe("incrementalRecovery against real Experiment/ExperimentMeasurementResult rows (Phase 25 backend-gap audit, Fix #2)", () => {
+    it("available with the real persisted paise values when the merchant's one experiment has a real VALID_EFFECT result", async () => {
+      const merchant = await makeMerchant();
+      const experiment = await makeExperiment(merchant.id);
+      await makeMeasurementResult(experiment.id);
+
+      const result = await getRecoveryOverview(merchant.id, {});
+      expect(result.incrementalRecovery).toEqual({
+        status: "available",
+        estimatedIncrementalGMVPaise: 200000,
+        estimatedCounterfactualTreatmentGMVPaise: 200000,
+      });
+    }, 30_000);
+
+    it("unavailable/no_valid_effect_result when the latest real result is VALID_INCONCLUSIVE, even though it carries a real observedDifference - never treated as causal", async () => {
+      const merchant = await makeMerchant();
+      const experiment = await makeExperiment(merchant.id);
+      await makeMeasurementResult(experiment.id, {
+        resultStatus: "VALID_INCONCLUSIVE",
+        observedDifference: 0.05,
+        observedDifferenceLower: -0.02,
+        observedDifferenceUpper: 0.12,
+        estimatedIncrementalGMVPaise: null,
+        estimatedCounterfactualTreatmentGMVPaise: null,
+      });
+
+      const result = await getRecoveryOverview(merchant.id, {});
+      expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "no_valid_effect_result" });
+    }, 30_000);
+
+    it("unavailable/ambiguous_multiple_valid_effect_experiments when TWO real experiments each have their own real VALID_EFFECT result - never guesses which counts", async () => {
+      const merchant = await makeMerchant();
+      const experimentOne = await makeExperiment(merchant.id);
+      const experimentTwo = await makeExperiment(merchant.id);
+      await makeMeasurementResult(experimentOne.id, { estimatedIncrementalGMVPaise: 111111, estimatedCounterfactualTreatmentGMVPaise: 111111 });
+      await makeMeasurementResult(experimentTwo.id, { estimatedIncrementalGMVPaise: 222222, estimatedCounterfactualTreatmentGMVPaise: 222222 });
+
+      const result = await getRecoveryOverview(merchant.id, {});
+      expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "ambiguous_multiple_valid_effect_experiments" });
+      expect(JSON.stringify(result)).not.toContain("111111");
+      expect(JSON.stringify(result)).not.toContain("222222");
+    }, 30_000);
+
+    it("cross-merchant isolation: Merchant A's real VALID_EFFECT experiment never makes Merchant B's incrementalRecovery available", async () => {
+      const merchantA = await makeMerchant();
+      const merchantB = await makeMerchant();
+      const experimentA = await makeExperiment(merchantA.id);
+      await makeMeasurementResult(experimentA.id);
+
+      const overviewB = await getRecoveryOverview(merchantB.id, {});
+      expect(overviewB.incrementalRecovery).toEqual({ status: "unavailable", reason: "no_experiment_configured" });
+    }, 30_000);
+  });
 });

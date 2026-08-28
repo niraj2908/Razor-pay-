@@ -135,12 +135,13 @@ Razorpay -> webhook verification -> event persistence -> acknowledge
 The webhook route itself was not changed. `candidateBuilder.ts` explicitly
 skips any `PaymentEvent` whose `payload._test_fixture.isTestFixture` is
 `true` (the 7 integration-test fixtures), and separately skips any event
-with no linked `Payment` row - which, today, is *every* real webhook
-event, since the route does not yet link `PaymentEvent.paymentId`. That is
-a pre-existing gap in the webhook route (out of scope here - "do not
-change the already-verified webhook infrastructure"), not something this
-phase silently works around: the builder fails safe and skips rather than
-fabricating a merchant/payment to attach to.
+with no linked `Payment` row. Association/creation is handled by a later
+phase (`webhooks/paymentAssociation.ts`, Phase 23 Step 3 - links an
+existing Payment; Phase 25 - creates a genuinely new one under the single
+configured Merchant when none exists yet, see `merchantResolution.ts`),
+called from the same processing boundary immediately before this builder
+runs. The builder still fails safe and skips rather than fabricating a
+merchant/payment to attach to if association could not resolve one.
 
 ## 10. Execution boundary (deferred)
 

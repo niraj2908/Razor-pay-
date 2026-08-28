@@ -4,12 +4,16 @@ const revenueRiskEventFindMany = vi.fn();
 const revenueRiskEventCount = vi.fn();
 const executionGroupBy = vi.fn();
 const outcomeFindMany = vi.fn();
+const experimentFindMany = vi.fn();
+const experimentMeasurementResultFindMany = vi.fn();
 
 vi.mock("@/lib/db", () => ({
   prisma: {
     revenueRiskEvent: { findMany: revenueRiskEventFindMany, count: revenueRiskEventCount },
     execution: { groupBy: executionGroupBy },
     outcome: { findMany: outcomeFindMany },
+    experiment: { findMany: experimentFindMany },
+    experimentMeasurementResult: { findMany: experimentMeasurementResultFindMany },
   },
 }));
 
@@ -22,6 +26,8 @@ function defaultMocks() {
   revenueRiskEventCount.mockResolvedValue(0);
   executionGroupBy.mockResolvedValue([]);
   outcomeFindMany.mockResolvedValue([]);
+  experimentFindMany.mockResolvedValue([]); // no experiments by default
+  experimentMeasurementResultFindMany.mockResolvedValue([]);
 }
 
 describe("overviewService", () => {
@@ -74,6 +80,7 @@ describe("overviewService", () => {
       expect(revenueRiskEventCount).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ merchantId: MERCHANT_A }) }));
       expect(executionGroupBy).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ payment: { merchantId: MERCHANT_A } } ) }));
       expect(outcomeFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ payment: { merchantId: MERCHANT_A } } ) }));
+      expect(experimentFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: { merchantId: MERCHANT_A } }));
     });
 
     it("queries open (unresolved) risk events with distinct paymentId - the grain contract for revenueAtRiskPaise/candidatesCount", async () => {
@@ -111,9 +118,10 @@ describe("overviewService", () => {
       });
     });
 
-    it("incrementalRecovery is unconditionally unavailable, regardless of any other data", async () => {
+    it("incrementalRecovery is unavailable with no_experiment_configured when the merchant has no Experiment at all", async () => {
       const result = await getRecoveryOverview(MERCHANT_A, {});
-      expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "experiment_merchant_isolation_not_implemented" });
+      expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "no_experiment_configured" });
+      expect(experimentMeasurementResultFindMany).not.toHaveBeenCalled(); // no experiments -> never even queries results
     });
 
     it("CRITICAL: revenueAtRiskPaise sums a payment's amount only ONCE even if multiple RevenueRiskEvent rows reference it (Prisma distinct already applied) - the count is unaffected", async () => {
@@ -177,6 +185,80 @@ describe("overviewService", () => {
       outcomeFindMany.mockResolvedValue([{ paymentId: "p1", status: "RECOVERED", attributionStatus: "NATURAL_RECOVERY", recoveredAmount: null }]);
       const result = await getRecoveryOverview(MERCHANT_A, {});
       expect(result.attributedOutcomes.naturalRecoveryGmvPaise).toBe(0);
+    });
+  });
+
+  describe("getRecoveryOverview - incrementalRecovery (Phase 25 backend-gap audit, Fix #2)", () => {
+    it("queries the latest measurement result PER experiment via generatedAt desc + distinct - never an arbitrary row", async () => {
+      experimentFindMany.mockResolvedValue([{ id: "exp_1" }]);
+      experimentMeasurementResultFindMany.mockResolvedValue([]);
+      await getRecoveryOverview(MERCHANT_A, {});
+      expect(experimentMeasurementResultFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { experimentId: { in: ["exp_1"] } },
+          orderBy: { generatedAt: "desc" },
+          distinct: ["experimentId"],
+        })
+      );
+    });
+
+    it("unavailable/no_valid_effect_result when the experiment exists but has never produced a measurement result", async () => {
+      experimentFindMany.mockResolvedValue([{ id: "exp_1" }]);
+      experimentMeasurementResultFindMany.mockResolvedValue([]);
+      const result = await getRecoveryOverview(MERCHANT_A, {});
+      expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "no_valid_effect_result" });
+    });
+
+    it.each(["VALID_INCONCLUSIVE", "INVALID", "INSUFFICIENT_DATA"] as const)(
+      "unavailable/no_valid_effect_result when the latest result is %s, even if it carries a real observedDifference - never treated as causal",
+      async (resultStatus) => {
+        experimentFindMany.mockResolvedValue([{ id: "exp_1" }]);
+        experimentMeasurementResultFindMany.mockResolvedValue([
+          {
+            resultStatus,
+            // A real, non-null observed difference - proves this field is
+            // never read/treated as an incremental estimate by this service.
+            observedDifference: 0.12,
+            estimatedIncrementalGMVPaise: null,
+            estimatedCounterfactualTreatmentGMVPaise: null,
+          },
+        ]);
+        const result = await getRecoveryOverview(MERCHANT_A, {});
+        expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "no_valid_effect_result" });
+      }
+    );
+
+    it("unavailable/no_valid_effect_result (defensive) when resultStatus is VALID_EFFECT but the persisted estimate fields are unexpectedly null - never exposes null as a number", async () => {
+      experimentFindMany.mockResolvedValue([{ id: "exp_1" }]);
+      experimentMeasurementResultFindMany.mockResolvedValue([
+        { resultStatus: "VALID_EFFECT", estimatedIncrementalGMVPaise: null, estimatedCounterfactualTreatmentGMVPaise: 100 },
+      ]);
+      const result = await getRecoveryOverview(MERCHANT_A, {});
+      expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "no_valid_effect_result" });
+    });
+
+    it("available with the exact persisted paise values when exactly one experiment has a real VALID_EFFECT result", async () => {
+      experimentFindMany.mockResolvedValue([{ id: "exp_1" }, { id: "exp_2" }]);
+      experimentMeasurementResultFindMany.mockResolvedValue([
+        { resultStatus: "VALID_INCONCLUSIVE", estimatedIncrementalGMVPaise: null, estimatedCounterfactualTreatmentGMVPaise: null },
+        { resultStatus: "VALID_EFFECT", estimatedIncrementalGMVPaise: 250000, estimatedCounterfactualTreatmentGMVPaise: 1000000 },
+      ]);
+      const result = await getRecoveryOverview(MERCHANT_A, {});
+      expect(result.incrementalRecovery).toEqual({
+        status: "available",
+        estimatedIncrementalGMVPaise: 250000,
+        estimatedCounterfactualTreatmentGMVPaise: 1000000,
+      });
+    });
+
+    it("unavailable/ambiguous_multiple_valid_effect_experiments when MORE THAN ONE experiment has its own real VALID_EFFECT result - never guesses which one counts", async () => {
+      experimentFindMany.mockResolvedValue([{ id: "exp_1" }, { id: "exp_2" }]);
+      experimentMeasurementResultFindMany.mockResolvedValue([
+        { resultStatus: "VALID_EFFECT", estimatedIncrementalGMVPaise: 100000, estimatedCounterfactualTreatmentGMVPaise: 400000 },
+        { resultStatus: "VALID_EFFECT", estimatedIncrementalGMVPaise: 999999, estimatedCounterfactualTreatmentGMVPaise: 999999 },
+      ]);
+      const result = await getRecoveryOverview(MERCHANT_A, {});
+      expect(result.incrementalRecovery).toEqual({ status: "unavailable", reason: "ambiguous_multiple_valid_effect_experiments" });
     });
   });
 

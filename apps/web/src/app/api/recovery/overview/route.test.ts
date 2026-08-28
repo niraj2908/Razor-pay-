@@ -31,7 +31,7 @@ const SAMPLE_RESULT = {
     interventionRecoveryGmvPaise: 0,
     observedRecoveryRate: null,
   },
-  incrementalRecovery: { status: "unavailable", reason: "experiment_merchant_isolation_not_implemented" },
+  incrementalRecovery: { status: "unavailable", reason: "no_experiment_configured" },
 };
 
 describe("GET /api/recovery/overview", () => {
