@@ -44,7 +44,12 @@ function prismaErrorCode(error: unknown): string | null {
   return null;
 }
 
-function normalizeEmail(email: string): string {
+/** Exported (Phase 26, login rate-limiting step) so a caller deriving a
+ * rate-limit key from an email uses the exact same normalization as
+ * credential lookup itself - a mismatch would let "Foo@Example.com" and
+ * "foo@example.com" land in two different rate-limit buckets for what is
+ * the same account. Behavior of this function is unchanged. */
+export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 

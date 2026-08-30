@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { TextField } from "@/components/ui/TextField";
 
@@ -90,6 +91,13 @@ export function LoginForm() {
       <Button type="submit" loading={submitting} className="mt-2 w-full">
         Sign in
       </Button>
+
+      <p className="text-fg-muted text-center text-sm">
+        New here?{" "}
+        <Link href="/signup" className="text-info font-medium hover:underline">
+          Create a workspace
+        </Link>
+      </p>
     </form>
   );
 }
