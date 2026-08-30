@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createOperatorSession, verifyOperatorCredentials } from "@/lib/auth/authService";
 import { SESSION_COOKIE_NAME, sessionCookieOptions } from "@/lib/auth/sessionCookie";
+import { checkLoginRateLimit, deriveClientIp } from "@/lib/auth/loginRateLimit";
+import { rateLimitHeaders } from "@/lib/rateLimit/rateLimitHttp";
 
 // Session lookups/writes need real Postgres via Prisma - this route must
 // run on the Node runtime, matching the webhook route's own reasoning.
@@ -30,6 +32,25 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    // Rate-limit check happens before any credential verification and
+    // depends only on attempt volume against two opaque hashed keys -
+    // never on whether the email corresponds to a real account - so a 429
+    // here carries no account-existence signal (see loginRateLimit.ts's
+    // own doc comment). No email/IP value is logged. Deliberately inside
+    // this try block: an unexpected throw here must route through the
+    // same sanitized internal_error response below, never escape raw -
+    // the primitive itself already fails closed on its own storage
+    // errors (see rateLimiter.ts), this only guards against a bug in the
+    // glue code around it.
+    const rateLimitDecision = checkLoginRateLimit(deriveClientIp(request), email);
+    if (!rateLimitDecision.allowed) {
+      console.warn("[auth] login rate limited");
+      return NextResponse.json(
+        { error: "rate_limited" },
+        { status: 429, headers: rateLimitHeaders(rateLimitDecision.result) }
+      );
+    }
+
     const result = await verifyOperatorCredentials(email, password);
     if (result.status !== "valid") {
       console.warn("[auth] login rejected: invalid credentials");
