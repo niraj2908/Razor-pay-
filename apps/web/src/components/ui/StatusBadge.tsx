@@ -5,7 +5,7 @@ import type { IconComponent } from "@/lib/design/icons";
  * Generic status indicator (Phase 26 Phase C visual pass).
  *
  * Status communicates through ICON + LABEL + COLOR together, never color
- * alone - a semantic Phosphor icon (always `aria-hidden`, since the visible
+ * alone - a semantic Lucide icon (always `aria-hidden`, since the visible
  * text label already carries the meaning) replaces the plain dot used in
  * the Phase B reset wherever a caller has one. Callers with no real
  * semantic icon (e.g. an ad-hoc pass/fail check) still get the dot
@@ -42,7 +42,7 @@ export function StatusBadge({ label, tone, icon: Icon, detail }: StatusBadgeProp
   return (
     <span className="inline-flex items-center gap-1.5 text-sm">
       {Icon ? (
-        <Icon aria-hidden="true" weight="bold" className={`h-3.5 w-3.5 shrink-0 ${TONE_TEXT[tone]}`} />
+        <Icon aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${TONE_TEXT[tone]}`} />
       ) : (
         <span aria-hidden="true" className={`h-[6px] w-[6px] shrink-0 rounded-full ${TONE_DOT[tone]}`} />
       )}

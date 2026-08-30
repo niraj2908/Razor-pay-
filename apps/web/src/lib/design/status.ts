@@ -24,7 +24,7 @@ import {
  *
  * `tone` and `icon` never ARE the sole communication - StatusBadge always
  * renders `label` text alongside them: status must never depend on color or
- * icon shape alone (icons here are always paired with a Phosphor `Icon`
+ * icon shape alone (icons here are always paired with a Lucide `Icon`
  * component, rendered `aria-hidden` next to the real text label).
  */
 

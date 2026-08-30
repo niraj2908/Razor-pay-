@@ -11,7 +11,7 @@ import { ProcessTimeline, type TimelineNode } from "@/components/ui/ProcessTimel
 import { DECISION_STATUS, EXECUTION_STATUS, OUTCOME_STATUS } from "@/lib/design/status";
 import { formatPercentOrUnavailable } from "@/lib/design/percent";
 import { humanizeEnumValue } from "@/lib/design/text";
-import { PendingIcon, ExecutionIcon, OutcomeIcon, AuditIcon, WalletIcon } from "@/lib/design/icons";
+import { PendingIcon, ExecutionIcon, OutcomeIcon, AuditIcon, PaymentIcon } from "@/lib/design/icons";
 
 /**
  * Decision Detail - an investigation workbench (Phase 26, second visual
@@ -92,7 +92,7 @@ export default async function DecisionDetailPage({
         icon={DECISION_STATUS[decision.decisionType].icon}
         actions={
           <Link href={`/recovery/${decision.id}/audit`} className="text-info flex items-center gap-1.5 text-sm font-medium hover:underline">
-            <AuditIcon aria-hidden="true" weight="regular" className="h-4 w-4" />
+            <AuditIcon aria-hidden="true" className="h-4 w-4" />
             View audit trail &rarr;
           </Link>
         }
@@ -207,7 +207,7 @@ export default async function DecisionDetailPage({
         <div className="border-border divide-border flex flex-col divide-y rounded-lg border lg:col-span-4 lg:self-start">
           <section className="p-5">
             <div className="mb-3 flex items-center gap-2">
-              <WalletIcon aria-hidden="true" weight="regular" className="text-fg-muted h-4 w-4" />
+              <PaymentIcon aria-hidden="true" className="text-fg-muted h-4 w-4" />
               <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Payment</h2>
             </div>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
@@ -221,7 +221,7 @@ export default async function DecisionDetailPage({
 
           <section className="p-5">
             <div className="mb-3 flex items-center gap-2">
-              <ExecutionIcon aria-hidden="true" weight="regular" className="text-fg-muted h-4 w-4" />
+              <ExecutionIcon aria-hidden="true" className="text-fg-muted h-4 w-4" />
               <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Execution</h2>
             </div>
             {decision.execution ? (
@@ -242,7 +242,7 @@ export default async function DecisionDetailPage({
 
           <section className="p-5">
             <div className="mb-3 flex items-center gap-2">
-              <OutcomeIcon aria-hidden="true" weight="regular" className="text-fg-muted h-4 w-4" />
+              <OutcomeIcon aria-hidden="true" className="text-fg-muted h-4 w-4" />
               <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Outcome</h2>
             </div>
             {decision.outcome ? (

@@ -21,13 +21,13 @@ export function MobileNav({ operatorEmail }: { operatorEmail: string | null }) {
     <header className="border-border bg-surface flex h-14 shrink-0 items-center justify-between border-b px-4 md:hidden">
       <span className="flex items-center gap-2">
         <span className="bg-info/10 text-info flex h-6 w-6 shrink-0 items-center justify-center rounded-sm">
-          <RecoveryIcon aria-hidden="true" weight="bold" className="h-3.5 w-3.5" />
+          <RecoveryIcon aria-hidden="true" className="h-3.5 w-3.5" />
         </span>
         <span className="text-fg text-sm font-semibold tracking-tight">Revenue Recovery</span>
       </span>
       <details key={pathname} className="relative">
         <summary className="text-fg-secondary flex cursor-pointer list-none items-center gap-1.5 text-[13px] font-medium">
-          <MenuIcon aria-hidden="true" weight="regular" className="h-4 w-4" />
+          <MenuIcon aria-hidden="true" className="h-4 w-4" />
           Menu
         </summary>
         <nav
@@ -49,7 +49,7 @@ export function MobileNav({ operatorEmail }: { operatorEmail: string | null }) {
                     : "text-fg-secondary border-transparent font-normal",
                 ].join(" ")}
               >
-                <Icon aria-hidden="true" weight={isActive ? "bold" : "regular"} className={`h-4 w-4 shrink-0 ${isActive ? "text-info" : "text-fg-muted"}`} />
+                <Icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${isActive ? "text-info" : "text-fg-muted"}`} />
                 {item.label}
               </Link>
             );

@@ -58,7 +58,7 @@ export default async function OverviewPage() {
         <section className="border-border bg-info/[0.03] flex flex-col gap-5 rounded-lg border p-5 xl:col-span-8">
           <div className="flex items-center gap-2">
             <span className="bg-info/10 text-info flex h-6 w-6 shrink-0 items-center justify-center rounded-sm">
-              <WalletIcon aria-hidden="true" weight="bold" className="h-3.5 w-3.5" />
+              <WalletIcon aria-hidden="true" className="h-3.5 w-3.5" />
             </span>
             <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Recovery performance</h2>
           </div>
@@ -70,7 +70,7 @@ export default async function OverviewPage() {
                 <Money value={{ kind: "amount", paise: overview.operational.revenueAtRiskPaise }} size="lg" />
               </div>
               <p className="mt-2 flex items-center gap-1.5 text-sm">
-                {hasAttention ? <EscalateIcon aria-hidden="true" weight="bold" className="text-warning h-3.5 w-3.5 shrink-0" /> : null}
+                {hasAttention ? <EscalateIcon aria-hidden="true" className="text-warning h-3.5 w-3.5 shrink-0" /> : null}
                 <span className={hasAttention ? "text-fg-secondary" : "text-fg-muted"}>
                   {overview.operational.candidatesCount} open recovery{" "}
                   {overview.operational.candidatesCount === 1 ? "candidate" : "candidates"}
@@ -81,7 +81,7 @@ export default async function OverviewPage() {
 
             <div>
               <h3 className="text-fg-muted flex items-center gap-1.5 text-[11px] font-medium tracking-wider uppercase">
-                <TrendUpIcon aria-hidden="true" weight="regular" className="h-3.5 w-3.5" />
+                <TrendUpIcon aria-hidden="true" className="h-3.5 w-3.5" />
                 Incremental recovery
               </h3>
               <div className="mt-1">
@@ -121,7 +121,7 @@ export default async function OverviewPage() {
         <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-4">
           <div className="flex items-center gap-2">
             <span className="bg-warning/10 text-warning flex h-6 w-6 shrink-0 items-center justify-center rounded-sm">
-              <EscalateIcon aria-hidden="true" weight="bold" className="h-3.5 w-3.5" />
+              <EscalateIcon aria-hidden="true" className="h-3.5 w-3.5" />
             </span>
             <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Operational attention</h2>
           </div>
@@ -167,7 +167,7 @@ export default async function OverviewPage() {
         {/* RECOVERY ACTIVITY / DISTRIBUTION */}
         <section className="border-border flex flex-col gap-5 rounded-lg border p-5 xl:col-span-7">
           <div className="flex items-center gap-2">
-            <OutcomeIcon aria-hidden="true" weight="regular" className="text-fg-muted h-4 w-4" />
+            <OutcomeIcon aria-hidden="true" className="text-fg-muted h-4 w-4" />
             <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Recovery activity &amp; distribution</h2>
           </div>
           {overview.attributedOutcomes.matureOutcomesCount === 0 ? (
@@ -205,7 +205,7 @@ export default async function OverviewPage() {
         {/* RECOVERY FLOW */}
         <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-5">
           <div className="flex items-center gap-2">
-            <RecoveryIcon aria-hidden="true" weight="regular" className="text-fg-muted h-4 w-4" />
+            <RecoveryIcon aria-hidden="true" className="text-fg-muted h-4 w-4" />
             <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Recovery flow</h2>
           </div>
           {overview.operational.interventionsAttempted === 0 ? (

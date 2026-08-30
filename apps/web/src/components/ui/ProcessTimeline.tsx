@@ -34,7 +34,7 @@ export function ProcessTimeline({ nodes }: { nodes: TimelineNode[] }) {
               <span
                 className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-2 ${node.done ? TONE_BORDER[node.tone] : "border-border"} ${node.done ? TONE_BG[node.tone] : "bg-surface"}`}
               >
-                <node.icon aria-hidden="true" weight="bold" className={`h-4 w-4 ${node.done ? TONE_ICON[node.tone] : "text-fg-muted"}`} />
+                <node.icon aria-hidden="true" className={`h-4 w-4 ${node.done ? TONE_ICON[node.tone] : "text-fg-muted"}`} />
               </span>
               <div>
                 <div className={`text-xs font-semibold ${node.done ? "text-fg" : "text-fg-muted"}`}>{node.label}</div>
@@ -56,7 +56,7 @@ export function ProcessTimeline({ nodes }: { nodes: TimelineNode[] }) {
               <span
                 className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 ${node.done ? TONE_BORDER[node.tone] : "border-border"} ${node.done ? TONE_BG[node.tone] : "bg-surface"}`}
               >
-                <node.icon aria-hidden="true" weight="bold" className={`h-4 w-4 ${node.done ? TONE_ICON[node.tone] : "text-fg-muted"}`} />
+                <node.icon aria-hidden="true" className={`h-4 w-4 ${node.done ? TONE_ICON[node.tone] : "text-fg-muted"}`} />
               </span>
               {i < nodes.length - 1 ? (
                 <div aria-hidden="true" className={`border-border w-0 flex-1 border-l-2 ${nodes[i + 1].done ? "" : "border-dashed"}`} style={{ minHeight: "24px" }} />

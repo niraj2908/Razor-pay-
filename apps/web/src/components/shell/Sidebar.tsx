@@ -36,7 +36,7 @@ export function Sidebar({ operatorEmail }: { operatorEmail: string | null }) {
     <div className="flex h-full flex-col">
       <div className="border-border flex h-14 shrink-0 items-center gap-2 border-b px-4">
         <span className="bg-info/10 text-info flex h-6 w-6 shrink-0 items-center justify-center rounded-sm">
-          <RecoveryIcon aria-hidden="true" weight="bold" className="h-3.5 w-3.5" />
+          <RecoveryIcon aria-hidden="true" className="h-3.5 w-3.5" />
         </span>
         <span className="text-fg text-sm font-semibold tracking-tight">Revenue Recovery</span>
       </div>
@@ -59,7 +59,7 @@ export function Sidebar({ operatorEmail }: { operatorEmail: string | null }) {
                     : "text-fg-secondary hover:text-fg hover:bg-surface-subtle border-transparent font-normal",
                 ].join(" ")}
               >
-                <Icon aria-hidden="true" weight={isActive ? "bold" : "regular"} className={`h-4 w-4 shrink-0 ${isActive ? "text-info" : "text-fg-muted"}`} />
+                <Icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${isActive ? "text-info" : "text-fg-muted"}`} />
                 {item.label}
               </Link>
             );

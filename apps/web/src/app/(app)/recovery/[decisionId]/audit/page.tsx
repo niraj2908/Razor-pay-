@@ -112,7 +112,7 @@ export default async function DecisionAuditTrailPage({
                         aria-hidden="true"
                         className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border ${TONE_BORDER[marker.tone]} ${TONE_BG[marker.tone]}`}
                       >
-                        <MarkerIcon aria-hidden="true" weight="bold" className={`h-3.5 w-3.5 ${TONE_ICON[marker.tone]}`} />
+                        <MarkerIcon aria-hidden="true" className={`h-3.5 w-3.5 ${TONE_ICON[marker.tone]}`} />
                       </span>
                       <span className="bg-border mt-1 w-px flex-1" />
                     </div>
