@@ -1,3 +1,4 @@
+import type { RecoveryDecision } from "@prisma/client";
 import { getRecoveryOverview } from "@/lib/recovery/overviewService";
 import { listRecoveryQueue } from "@/lib/recovery/recoveryQueueService";
 import { getDecisionDetail, findDecisionIdByPaymentReference } from "@/lib/recovery/decisionDetailService";
@@ -84,6 +85,50 @@ async function answerAttention(merchantId: string): Promise<AssistantAnswer> {
   };
 }
 
+/** A question naming a decision status ("which decisions are waiting?",
+ * "what's been escalated?") must be answered from THAT status specifically,
+ * not swallowed by the broader recovery-outcomes intent just because the
+ * word "recovery" or "decisions" also appears - this was the exact gap
+ * found during local verification ("Which recovery decisions are
+ * waiting?" incorrectly answered the general outcomes question instead).
+ * Reuses `listRecoveryQueue`'s existing `decisionType` filter - a real,
+ * already-authorized capability, not a new query. */
+const DECISION_STATUS_KEYWORDS: Record<RecoveryDecision, RegExp> = {
+  ACT: /\bact(ing|ed|ion)?\b/,
+  WAIT: /\bwait(ing|ed)?\b/,
+  STOP: /\bstop(ped|ping)?\b/,
+  ESCALATE: /\bescalat(e|ed|ing|ion)\b/,
+};
+
+function detectDecisionStatusIntent(q: string): RecoveryDecision | null {
+  if (!/\b(decision|decisions|case|cases|candidate|candidates)\b/.test(q)) return null;
+  for (const [type, pattern] of Object.entries(DECISION_STATUS_KEYWORDS) as Array<[RecoveryDecision, RegExp]>) {
+    if (pattern.test(q)) return type;
+  }
+  return null;
+}
+
+async function answerDecisionsByStatus(merchantId: string, decisionType: RecoveryDecision): Promise<AssistantAnswer> {
+  const result = await listRecoveryQueue(merchantId, { status: "open", decisionType, sort: "amountAtRisk_desc", limit: 5 });
+  const label = humanizeEnumValue(decisionType);
+  const article = /^[AEIOU]/.test(label) ? "an" : "a";
+  if (result.items.length === 0) {
+    return {
+      intent: "decisions_by_status",
+      answer: `No open recovery candidates currently have ${article} ${label} decision.`,
+      citations: [`Recovery Queue - status=open, decisionType=${decisionType}`],
+    };
+  }
+  const lines = result.items.map(
+    (item, i) => `${i + 1}. ${humanizeEnumValue(item.diagnosis)}, ${formatPaiseAsInr(item.amountAtRiskPaise)}`
+  );
+  return {
+    intent: "decisions_by_status",
+    answer: `${result.items.length} open candidate${result.items.length === 1 ? "" : "s"} with ${article} ${label} decision (highest amount at risk first):\n${lines.join("\n")}`,
+    citations: [`Recovery Queue - status=open, decisionType=${decisionType}, sort=amountAtRisk_desc, limit=${result.items.length}`],
+  };
+}
+
 async function answerExplainDecision(merchantId: string, decisionId: string): Promise<AssistantAnswer> {
   const result = await getDecisionDetail(merchantId, decisionId);
   if (result.status === "not_found") {
@@ -159,7 +204,7 @@ async function answerExperiment(merchantId: string, explicitId: string | null): 
 const FALLBACK_ANSWER: AssistantAnswer = {
   intent: "fallback",
   answer:
-    'I can answer questions grounded in your merchant\'s real data. Try: "Why is revenue at risk?", "Which cases need attention?", "Explain decision <id>", "What happened to payment <id>?", "What recovery outcomes did we get?", or "What does the experiment show?"',
+    'I can answer questions grounded in your merchant\'s real data. Try: "Why is revenue at risk?", "Which cases need attention?", "Which decisions are waiting?", "Explain decision <id>", "What happened to payment <id>?", "What recovery outcomes did we get?", or "What does the experiment show?"',
   citations: [],
 };
 
@@ -187,6 +232,10 @@ export async function answerAssistantQuestion(merchantId: string, question: stri
   }
   if (/attention|which case|need(s)? (attention|review)/.test(q)) {
     return answerAttention(merchantId);
+  }
+  const decisionStatus = detectDecisionStatusIntent(q);
+  if (decisionStatus) {
+    return answerDecisionsByStatus(merchantId, decisionStatus);
   }
   if (/explain/.test(q) && /decision/.test(q)) {
     return { intent: "explain_decision", answer: "Which decision? Include its id, e.g. \"Explain decision cljk3n9p1...\".", citations: [] };
