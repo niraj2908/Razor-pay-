@@ -33,12 +33,21 @@ async function main() {
   if (command === "reset") {
     const result = await resetDemoWorkspace();
     console.log("[demo] reset result:", result);
+    if (result.status === "refused") {
+      process.exitCode = 1;
+    }
     return;
   }
 
   if (command === "reseed") {
     const resetResult = await resetDemoWorkspace();
     console.log("[demo] reset result:", resetResult);
+    // A refused reset must not be followed by a seed that would then report
+    // "already_seeded" and make the whole command look successful.
+    if (resetResult.status === "refused") {
+      process.exitCode = 1;
+      return;
+    }
     const seedResult = await seedDemoWorkspace();
     console.log("[demo] seed result:", seedResult);
     if (seedResult.status === "unsafe") {

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/lib/db";
 import { seedDemoWorkspace } from "./seedDemoWorkspace";
 import { resetDemoWorkspace } from "./resetDemoWorkspace";
-import { DEMO_EXPERIMENT_ID, DEMO_MERCHANT_ID, DEMO_OPERATOR_ID } from "./config";
+import { DEMO_IDENTITY, DEMO_MERCHANT_ID, DEMO_OPERATOR_ID, type DemoWorkspaceIdentity } from "./config";
 import { DEMO_DECISION_SCENARIOS } from "./scenarios";
 import { resolveOperatorSession, createOperatorSession } from "@/lib/auth/authService";
 import { resolveMerchantAccess } from "@/lib/auth/merchantAccess";
@@ -33,6 +33,31 @@ function extractSessionToken(response: Response): string {
  */
 const TEST_EXPERIMENT_CANDIDATE_COUNT = 8;
 
+/**
+ * This suite seeds and resets its OWN workspace, never the evaluator's.
+ *
+ * It previously operated on the real `DEMO_IDENTITY` and reset it in
+ * `afterAll`. Because local development, this suite and the deployed
+ * application all share one database, a single run left the deployment with
+ * no Demo Workspace at all and a visitor landing on "demo workspace not
+ * seeded". Giving the suite its own identity removes that hazard
+ * structurally rather than relying on a flag someone must remember to set.
+ *
+ * The ids stay deterministic within a run but are tagged per run, so two
+ * concurrent runs cannot collide on the seed's fixed row ids either. The
+ * experiment id is alphanumeric-only because `/experiments/[id]` validates
+ * its route param with `isPlausibleId()`, which rejects underscores.
+ */
+const RUN_TAG = randomUUID().replace(/-/g, "").slice(0, 12);
+const TEST_IDENTITY: DemoWorkspaceIdentity = {
+  merchantId: `demo_test_merchant_${RUN_TAG}`,
+  merchantName: "Demo — Revenue Recovery (Synthetic Test Mode)",
+  operatorId: `demo_test_operator_${RUN_TAG}`,
+  experimentId: `demotestexperiment${RUN_TAG}`,
+  idPrefix: `demotest${RUN_TAG}`,
+  operatorEmail: `demo-test-operator-${RUN_TAG}@revenue-recovery.demo`,
+};
+
 let controlMerchantId: string;
 let controlOperatorId: string;
 let controlPaymentId: string;
@@ -60,11 +85,11 @@ async function expectControlMerchantIntact(): Promise<void> {
   expect(payment).not.toBeNull();
 }
 
-async function countDemoWorkspaceRows() {
-  const merchant = await prisma.merchant.findUnique({ where: { id: DEMO_MERCHANT_ID } });
-  const payments = await prisma.payment.count({ where: { merchantId: DEMO_MERCHANT_ID } });
+async function countDemoWorkspaceRows(identity: DemoWorkspaceIdentity = TEST_IDENTITY) {
+  const merchant = await prisma.merchant.findUnique({ where: { id: identity.merchantId } });
+  const payments = await prisma.payment.count({ where: { merchantId: identity.merchantId } });
   const riskEvents = await prisma.revenueRiskEvent.findMany({
-    where: { merchantId: DEMO_MERCHANT_ID },
+    where: { merchantId: identity.merchantId },
     include: { decisions: { include: { executions: true, outcome: true } } },
   });
   const decisions = riskEvents.flatMap((r) => r.decisions);
@@ -73,7 +98,7 @@ async function countDemoWorkspaceRows() {
   const executionStatuses = new Set(executions.map((e) => e.status));
   const outcomes = decisions.map((d) => d.outcome).filter((o): o is NonNullable<typeof o> => o !== null);
   const outcomeStatuses = new Set(outcomes.map((o) => o.status));
-  const experiment = await prisma.experiment.findUnique({ where: { id: DEMO_EXPERIMENT_ID } });
+  const experiment = await prisma.experiment.findUnique({ where: { id: identity.experimentId } });
   const assignments = experiment
     ? await prisma.experimentAssignment.findMany({ where: { experimentId: experiment.id } })
     : [];
@@ -83,7 +108,7 @@ async function countDemoWorkspaceRows() {
   const auditEvents = await prisma.auditEvent.count({
     where: {
       OR: [
-        { merchantId: DEMO_MERCHANT_ID },
+        { merchantId: identity.merchantId },
         { entityType: "Decision", entityId: { in: decisions.map((d) => d.id) } },
         { entityType: "Execution", entityId: { in: executions.map((e) => e.id) } },
         { entityType: "Outcome", entityId: { in: outcomes.map((o) => o.id) } },
@@ -112,12 +137,12 @@ async function countDemoWorkspaceRows() {
 describe("Demo Workspace seed/reset against a real database", () => {
   beforeAll(async () => {
     process.env.DEMO_OPERATOR_PASSWORD ??= "phase28-demo-integration-test-password";
-    await resetDemoWorkspace();
+    await resetDemoWorkspace(TEST_IDENTITY);
     await createControlMerchant();
   }, 60_000);
 
   afterAll(async () => {
-    await resetDemoWorkspace();
+    await resetDemoWorkspace(TEST_IDENTITY);
     await prisma.merchant.delete({ where: { id: controlMerchantId } }).catch(() => undefined);
     await prisma.$disconnect();
   }, 60_000);
@@ -125,15 +150,15 @@ describe("Demo Workspace seed/reset against a real database", () => {
   it(
     "1/2. creates exactly one Demo Merchant and its Demo Operator belonging to it",
     async () => {
-      const result = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT);
+      const result = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT, TEST_IDENTITY);
       expect(result.status).toBe("seeded");
 
-      const merchant = await prisma.merchant.findUnique({ where: { id: DEMO_MERCHANT_ID } });
+      const merchant = await prisma.merchant.findUnique({ where: { id: TEST_IDENTITY.merchantId } });
       expect(merchant).not.toBeNull();
 
-      const operator = await prisma.operator.findUnique({ where: { id: DEMO_OPERATOR_ID } });
+      const operator = await prisma.operator.findUnique({ where: { id: TEST_IDENTITY.operatorId } });
       expect(operator).not.toBeNull();
-      expect(operator?.merchantId).toBe(DEMO_MERCHANT_ID);
+      expect(operator?.merchantId).toBe(TEST_IDENTITY.merchantId);
     },
     // Observed up to ~120s for a single 8-candidate seed when the full
     // integration suite runs concurrently and contends for the same
@@ -146,7 +171,7 @@ describe("Demo Workspace seed/reset against a real database", () => {
     "3. re-running the seed is idempotent - reports already_seeded and creates no new rows",
     async () => {
       const before = await countDemoWorkspaceRows();
-      const result = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT);
+      const result = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT, TEST_IDENTITY);
       expect(result.status).toBe("already_seeded");
       const after = await countDemoWorkspaceRows();
       expect(after.payments).toBe(before.payments);
@@ -213,7 +238,7 @@ describe("Demo Workspace seed/reset against a real database", () => {
       const counts = await countDemoWorkspaceRows();
       expect(counts.auditEvents).toBeGreaterThan(0);
 
-      const decisionAudits = await prisma.auditEvent.count({ where: { entityType: "Decision", merchantId: DEMO_MERCHANT_ID } });
+      const decisionAudits = await prisma.auditEvent.count({ where: { entityType: "Decision", merchantId: TEST_IDENTITY.merchantId } });
       expect(decisionAudits).toBeGreaterThan(0);
     },
     30_000
@@ -222,7 +247,7 @@ describe("Demo Workspace seed/reset against a real database", () => {
   it(
     "11. reset removes ONLY Demo Workspace data, never the unrelated control Merchant",
     async () => {
-      const result = await resetDemoWorkspace();
+      const result = await resetDemoWorkspace(TEST_IDENTITY);
       expect(result.status).toBe("reset");
 
       const afterReset = await countDemoWorkspaceRows();
@@ -241,12 +266,12 @@ describe("Demo Workspace seed/reset against a real database", () => {
   it(
     "12. seeding again after a reset reproduces the same logical dataset (deterministic counts and decision distribution)",
     async () => {
-      const first = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT);
+      const first = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT, TEST_IDENTITY);
       expect(first.status).toBe("seeded");
       const firstCounts = await countDemoWorkspaceRows();
 
-      await resetDemoWorkspace();
-      const second = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT);
+      await resetDemoWorkspace(TEST_IDENTITY);
+      const second = await seedDemoWorkspace(new Date(), TEST_EXPERIMENT_CANDIDATE_COUNT, TEST_IDENTITY);
       expect(second.status).toBe("seeded");
       const secondCounts = await countDemoWorkspaceRows();
 
@@ -272,6 +297,45 @@ describe("Demo Workspace seed/reset against a real database", () => {
     // completes in well under 2 minutes).
     900_000
   );
+
+});
+
+/**
+ * The two `/demo` route cases below are the ONLY ones that must run against
+ * the real evaluator workspace, because `GET /demo` resolves the fixed
+ * `DEMO_OPERATOR_ID` and cannot be pointed at a throwaway identity.
+ *
+ * They are therefore deliberately NON-DESTRUCTIVE: the hook seeds the real
+ * workspace only if it is absent (`seedDemoWorkspace` is idempotent and
+ * returns `already_seeded` otherwise) and nothing here ever resets it. That
+ * is what keeps a full integration run from leaving the deployed evaluator
+ * environment empty.
+ */
+describe("Explore Demo login route against the real evaluator workspace", () => {
+  let controlOperatorIdForStaleSession: string;
+
+  beforeAll(async () => {
+    process.env.DEMO_OPERATOR_PASSWORD ??= "phase28-demo-integration-test-password";
+    const seeded = await seedDemoWorkspace();
+    expect(["seeded", "already_seeded"]).toContain(seeded.status);
+
+    const tag = randomUUID();
+    const merchant = await prisma.merchant.create({ data: { name: `phase28-demo-route-control-${tag}` } });
+    const operator = await prisma.operator.create({
+      data: { merchantId: merchant.id, email: `phase28-demo-route-${tag}@example.com`, passwordHash: "scrypt:1:1:1:aa:bb" },
+    });
+    controlOperatorIdForStaleSession = operator.id;
+  }, 600_000);
+
+  afterAll(async () => {
+    // Deliberately does NOT reset the real Demo Workspace - only the
+    // unrelated control merchant this block created for itself.
+    const operator = await prisma.operator.findUnique({ where: { id: controlOperatorIdForStaleSession } });
+    if (operator) {
+      await prisma.merchant.delete({ where: { id: operator.merchantId } }).catch(() => undefined);
+    }
+    await prisma.$disconnect();
+  }, 60_000);
 
   // Regression coverage for a reported production bug: an evaluator opening
   // the app independently (outside this Claude session) reported seeing an
@@ -303,7 +367,7 @@ describe("Demo Workspace seed/reset against a real database", () => {
       const access = await resolveMerchantAccess(session!.operator.id);
       expect(access?.merchantId).toBe(DEMO_MERCHANT_ID);
 
-      const counts = await countDemoWorkspaceRows();
+      const counts = await countDemoWorkspaceRows(DEMO_IDENTITY);
       expect(counts.merchantExists).toBe(true);
       expect(counts.payments).toBeGreaterThan(0);
       expect(counts.decisionCount).toBeGreaterThan(0);
@@ -314,7 +378,7 @@ describe("Demo Workspace seed/reset against a real database", () => {
   it(
     "14. /demo unconditionally overwrites a pre-existing, unrelated session rather than being blocked by it - the confirmed root cause of the reported bug",
     async () => {
-      const staleSession = await createOperatorSession(controlOperatorId);
+      const staleSession = await createOperatorSession(controlOperatorIdForStaleSession);
       const requestWithStaleCookie = new NextRequest("http://localhost/demo", {
         headers: { cookie: `${SESSION_COOKIE_NAME}=${staleSession.token}` },
       });

@@ -6,7 +6,7 @@ import { processOutcomeAttributionForPaymentEvent } from "@/lib/outcomes/outcome
 import { resolveExperimentAssignment } from "@/lib/experiments/experimentService";
 import { computeExperimentResult } from "@/lib/experiments/measurement/experimentResultService";
 import { persistExperimentResult } from "@/lib/experiments/measurement/experimentMeasurementResultService";
-import { resolveDemoConfig, DemoConfigResolution } from "./config";
+import { resolveDemoConfig, DEMO_IDENTITY, type DemoConfigResolution, type DemoWorkspaceIdentity } from "./config";
 import { DEMO_DECISION_SCENARIOS, buildScenarioContext } from "./scenarios";
 import { persistDemoDecision, persistSyntheticExecution } from "./persistence";
 
@@ -74,11 +74,26 @@ export type SeedDemoWorkspaceResult =
       experimentMeasurementResultStatus: string;
     };
 
-function demoPaymentId(key: string): string {
-  return `demo_payment_${key}`;
+function demoPaymentId(prefix: string, key: string): string {
+  return `${prefix}_payment_${key}`;
 }
-function demoRiskEventId(key: string): string {
-  return `demo_risk_${key}`;
+function demoRiskEventId(prefix: string, key: string): string {
+  return `${prefix}_risk_${key}`;
+}
+
+/**
+ * The tag used inside the synthetic, Razorpay-SHAPED reference ids
+ * (`plink_DEMO_S0`, `pay_DEMO_E001`). Both columns are uniquely constrained,
+ * so they must vary with the workspace identity or a second seeded workspace
+ * collides with the first.
+ *
+ * Uppercasing the prefix means the real Demo Workspace keeps byte-identical
+ * ids to before this became a parameter ("demo" -> "DEMO"), so nothing about
+ * the evaluator's dataset changed; only a differently-prefixed workspace
+ * (the integration suite's) gets different ones.
+ */
+function refTag(prefix: string): string {
+  return prefix.toUpperCase();
 }
 
 async function ensureMerchantAndOperator(config: Extract<DemoConfigResolution, { status: "ready" }>) {
@@ -105,12 +120,12 @@ async function ensureMerchantAndOperator(config: Extract<DemoConfigResolution, {
 /** Persists the nine hand-designed decision-coverage scenarios (see
  * scenarios.ts) - every ACT/WAIT/STOP/ESCALATE reason the real engine can
  * legitimately produce under the current default policy and model tables. */
-async function seedDecisionScenarios(merchantId: string, now: Date): Promise<void> {
+async function seedDecisionScenarios(merchantId: string, idPrefix: string, now: Date): Promise<void> {
   for (let i = 0; i < DEMO_DECISION_SCENARIOS.length; i++) {
     const scenario = DEMO_DECISION_SCENARIOS[i];
     console.log(`[demo] decision scenario ${i + 1}/${DEMO_DECISION_SCENARIOS.length}: ${scenario.key}`);
-    const paymentId = demoPaymentId(scenario.key);
-    const riskEventId = demoRiskEventId(scenario.key);
+    const paymentId = demoPaymentId(idPrefix, scenario.key);
+    const riskEventId = demoRiskEventId(idPrefix, scenario.key);
     const detectedAt = daysAgo(now, 12 - i);
     const decidedAt = minutesAfter(detectedAt, 3);
 
@@ -151,7 +166,7 @@ async function seedDecisionScenarios(merchantId: string, now: Date): Promise<voi
       const event = await prisma.paymentEvent.create({
         data: {
           paymentId,
-          razorpayEventId: `demo_event_${scenario.key}_captured`,
+          razorpayEventId: `${idPrefix}_event_${scenario.key}_captured`,
           eventType: "payment.captured",
           payload: { event: "payment.captured", demo: true },
           receivedAt: recoveredAt,
@@ -174,19 +189,19 @@ async function seedDecisionScenarios(merchantId: string, now: Date): Promise<voi
         // the existing, unmodified Decision Detail layout (see the Phase
         // 28B report: the full scenario key alone overlapped the adjacent
         // "Executed" timestamp at real screen widths).
-        razorpayReferenceId: `plink_DEMO_S${i}`,
+        razorpayReferenceId: `plink_${refTag(idPrefix)}_S${i}`,
         executedAt,
         completedAt: minutesAfter(executedAt, 1),
       });
       const paidAt = minutesAfter(executedAt, 45);
       const recoveredPayment = await prisma.payment.create({
         data: {
-          id: `demo_payment_recovered_${scenario.key}`,
+          id: `${idPrefix}_payment_recovered_${scenario.key}`,
           merchantId,
           amount: scenario.amountPaise,
           method: scenario.paymentMethod,
           status: "CAPTURED",
-          razorpayPaymentId: `pay_DEMO_S${i}`,
+          razorpayPaymentId: `pay_${refTag(idPrefix)}_S${i}`,
           createdAt: paidAt,
         },
       });
@@ -197,7 +212,7 @@ async function seedDecisionScenarios(merchantId: string, now: Date): Promise<voi
       const event = await prisma.paymentEvent.create({
         data: {
           paymentId: recoveredPayment.id,
-          razorpayEventId: `demo_event_${scenario.key}_link_paid`,
+          razorpayEventId: `${idPrefix}_event_${scenario.key}_link_paid`,
           eventType: "payment_link.paid",
           payload: { event: "payment_link.paid", demo: true },
           receivedAt: paidAt,
@@ -228,7 +243,7 @@ async function seedDecisionScenarios(merchantId: string, now: Date): Promise<voi
       const event = await prisma.paymentEvent.create({
         data: {
           paymentId,
-          razorpayEventId: `demo_event_${scenario.key}_redelivered_failed`,
+          razorpayEventId: `${idPrefix}_event_${scenario.key}_redelivered_failed`,
           eventType: "payment.failed",
           payload: { event: "payment.failed", demo: true },
           receivedAt: minutesAfter(executedAt, 5),
@@ -273,6 +288,7 @@ function planExperimentUnits(candidateCount: number): ExperimentUnitPlan[] {
 async function seedExperiment(
   merchantId: string,
   experimentId: string,
+  idPrefix: string,
   now: Date,
   candidateCount: number
 ): Promise<{ candidates: number; treatmentUnits: number; controlUnits: number }> {
@@ -306,9 +322,9 @@ async function seedExperiment(
     if (plan.index % 10 === 0) {
       console.log(`[demo] experiment candidate ${plan.index}/${plans.length}`);
     }
-    const key = `demo_exp_candidate_${String(plan.index).padStart(3, "0")}`;
-    const paymentId = demoPaymentId(key);
-    const riskEventId = demoRiskEventId(key);
+    const key = `${idPrefix}_exp_candidate_${String(plan.index).padStart(3, "0")}`;
+    const paymentId = demoPaymentId(idPrefix, key);
+    const riskEventId = demoRiskEventId(idPrefix, key);
     const fraction = plans.length > 1 ? plan.index / (plans.length - 1) : 0;
     const candidateAt = new Date(windowStart.getTime() + fraction * (windowEnd.getTime() - windowStart.getTime()));
     const decidedAt = minutesAfter(candidateAt, 2);
@@ -375,7 +391,7 @@ async function seedExperiment(
         // Short and obviously-synthetic (see the same note in
         // seedDecisionScenarios) - fits the existing, unmodified Decision
         // Detail layout without overflowing into the adjacent timestamp.
-        razorpayReferenceId: `plink_DEMO_E${String(plan.index).padStart(3, "0")}`,
+        razorpayReferenceId: `plink_${refTag(idPrefix)}_E${String(plan.index).padStart(3, "0")}`,
         executedAt,
         completedAt: minutesAfter(executedAt, 1),
       });
@@ -384,12 +400,12 @@ async function seedExperiment(
         const paidAt = minutesAfter(executedAt, 60);
         const recoveredPayment = await prisma.payment.create({
           data: {
-            id: `demo_payment_recovered_${key}`,
+            id: `${idPrefix}_payment_recovered_${key}`,
             merchantId,
             amount: plan.amountPaise,
             method: plan.paymentMethod,
             status: "CAPTURED",
-            razorpayPaymentId: `pay_DEMO_E${String(plan.index).padStart(3, "0")}`,
+            razorpayPaymentId: `pay_${refTag(idPrefix)}_E${String(plan.index).padStart(3, "0")}`,
             createdAt: paidAt,
           },
         });
@@ -397,7 +413,7 @@ async function seedExperiment(
         const event = await prisma.paymentEvent.create({
           data: {
             paymentId: recoveredPayment.id,
-            razorpayEventId: `demo_event_${key}_link_paid`,
+            razorpayEventId: `${idPrefix}_event_${key}_link_paid`,
             eventType: "payment_link.paid",
             payload: { event: "payment_link.paid", demo: true },
             receivedAt: paidAt,
@@ -408,7 +424,7 @@ async function seedExperiment(
         const event = await prisma.paymentEvent.create({
           data: {
             paymentId,
-            razorpayEventId: `demo_event_${key}_redelivered_failed`,
+            razorpayEventId: `${idPrefix}_event_${key}_redelivered_failed`,
             eventType: "payment.failed",
             payload: { event: "payment.failed", demo: true },
             receivedAt: minutesAfter(executedAt, 5),
@@ -429,7 +445,7 @@ async function seedExperiment(
         const event = await prisma.paymentEvent.create({
           data: {
             paymentId,
-            razorpayEventId: `demo_event_${key}_captured`,
+            razorpayEventId: `${idPrefix}_event_${key}_captured`,
             eventType: "payment.captured",
             payload: { event: "payment.captured", demo: true },
             receivedAt: recoveredAt,
@@ -440,7 +456,7 @@ async function seedExperiment(
         const event = await prisma.paymentEvent.create({
           data: {
             paymentId,
-            razorpayEventId: `demo_event_${key}_redelivered_failed`,
+            razorpayEventId: `${idPrefix}_event_${key}_redelivered_failed`,
             eventType: "payment.failed",
             payload: { event: "payment.failed", demo: true },
             receivedAt: minutesAfter(decidedAt, 5),
@@ -461,9 +477,10 @@ async function seedExperiment(
 
 export async function seedDemoWorkspace(
   now: Date = new Date(),
-  experimentCandidateCount: number = EXPERIMENT_CANDIDATE_COUNT
+  experimentCandidateCount: number = EXPERIMENT_CANDIDATE_COUNT,
+  identity: DemoWorkspaceIdentity = DEMO_IDENTITY
 ): Promise<SeedDemoWorkspaceResult> {
-  const config = await resolveDemoConfig();
+  const config = await resolveDemoConfig(identity);
   if (config.status !== "ready") {
     return { status: "unsafe", reason: config.reason };
   }
@@ -471,16 +488,17 @@ export async function seedDemoWorkspace(
   await ensureMerchantAndOperator(config);
 
   const marker = await prisma.revenueRiskEvent.findUnique({
-    where: { id: demoRiskEventId(DEMO_DECISION_SCENARIOS[0].key) },
+    where: { id: demoRiskEventId(config.idPrefix, DEMO_DECISION_SCENARIOS[0].key) },
   });
   if (marker) {
     return { status: "already_seeded", merchantId: config.merchantId, operatorId: config.operatorId };
   }
 
-  await seedDecisionScenarios(config.merchantId, now);
+  await seedDecisionScenarios(config.merchantId, config.idPrefix, now);
   const { candidates, treatmentUnits, controlUnits } = await seedExperiment(
     config.merchantId,
     config.experimentId,
+    config.idPrefix,
     now,
     experimentCandidateCount
   );

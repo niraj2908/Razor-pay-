@@ -30,6 +30,46 @@ export const DEMO_EXPERIMENT_ID = "demoexperimentpaymentlinknudge";
 const DEFAULT_DEMO_OPERATOR_EMAIL = "demo-operator@revenue-recovery.demo";
 
 /**
+ * The complete identity of ONE demo-shaped workspace: which Merchant and
+ * Operator rows it owns, which Experiment it runs, and the prefix every row
+ * the seed creates is named with.
+ *
+ * This exists so the seed/reset pair is addressable rather than global. The
+ * evaluator's Demo Workspace is `DEMO_IDENTITY` below; the integration suite
+ * builds its own throwaway identity instead, which is what makes it
+ * STRUCTURALLY impossible for a test's cleanup to delete the workspace an
+ * evaluator is looking at.
+ *
+ * That mattered in practice: local development, the integration suite and
+ * the deployed application all share one database, so a suite whose
+ * `afterAll` reset the real demo left the deployment with no data at all.
+ * Fixing that with an environment flag would only have moved the hazard;
+ * giving the tests their own identity removes it.
+ *
+ * `idPrefix` must stay lowercase alphanumeric with underscores, and
+ * `experimentId` must be alphanumeric ONLY - `/experiments/[id]` validates
+ * its route param with `isPlausibleId()`, which rejects underscores.
+ */
+export type DemoWorkspaceIdentity = {
+  merchantId: string;
+  merchantName: string;
+  operatorId: string;
+  experimentId: string;
+  idPrefix: string;
+  /** Overrides the env-configured operator email. Used by tests so their
+   * operator can never collide with the real demo operator's unique email. */
+  operatorEmail?: string;
+};
+
+export const DEMO_IDENTITY: DemoWorkspaceIdentity = {
+  merchantId: DEMO_MERCHANT_ID,
+  merchantName: DEMO_MERCHANT_NAME,
+  operatorId: DEMO_OPERATOR_ID,
+  experimentId: DEMO_EXPERIMENT_ID,
+  idPrefix: "demo",
+};
+
+/**
  * The demo operator's password MUST come from the environment - never
  * hardcoded, never committed (standing project requirement). There is
  * deliberately no fallback value: a missing `DEMO_OPERATOR_PASSWORD` fails
@@ -47,6 +87,7 @@ export type DemoConfigResolution =
       operatorEmail: string;
       operatorPassword: string;
       experimentId: string;
+      idPrefix: string;
     }
   | { status: "missing_password"; reason: string }
   | { status: "unsafe_id_collision"; reason: string };
@@ -66,20 +107,22 @@ export type DemoConfigResolution =
  *      would require someone to have deliberately crafted a colliding id,
  *      since real signups always get a random cuid()).
  */
-export async function resolveDemoConfig(): Promise<DemoConfigResolution> {
+export async function resolveDemoConfig(
+  identity: DemoWorkspaceIdentity = DEMO_IDENTITY
+): Promise<DemoConfigResolution> {
   const configuredRealMerchantId = process.env.RAZORPAY_MERCHANT_ID?.trim();
-  if (configuredRealMerchantId && configuredRealMerchantId === DEMO_MERCHANT_ID) {
+  if (configuredRealMerchantId && configuredRealMerchantId === identity.merchantId) {
     return {
       status: "unsafe_id_collision",
-      reason: "DEMO_MERCHANT_ID is identical to the configured RAZORPAY_MERCHANT_ID - refusing to seed.",
+      reason: "The demo merchant id is identical to the configured RAZORPAY_MERCHANT_ID - refusing to seed.",
     };
   }
 
-  const existing = await prisma.merchant.findUnique({ where: { id: DEMO_MERCHANT_ID } });
-  if (existing && existing.name !== DEMO_MERCHANT_NAME) {
+  const existing = await prisma.merchant.findUnique({ where: { id: identity.merchantId } });
+  if (existing && existing.name !== identity.merchantName) {
     return {
       status: "unsafe_id_collision",
-      reason: `A Merchant already exists at id "${DEMO_MERCHANT_ID}" with name "${existing.name}", not the expected demo merchant name - refusing to touch an unrelated Merchant.`,
+      reason: `A Merchant already exists at id "${identity.merchantId}" with name "${existing.name}", not the expected demo merchant name - refusing to touch an unrelated Merchant.`,
     };
   }
 
@@ -91,15 +134,17 @@ export async function resolveDemoConfig(): Promise<DemoConfigResolution> {
     };
   }
 
-  const operatorEmail = process.env[DEMO_OPERATOR_EMAIL_ENV_VAR]?.trim() || DEFAULT_DEMO_OPERATOR_EMAIL;
+  const operatorEmail =
+    identity.operatorEmail ?? (process.env[DEMO_OPERATOR_EMAIL_ENV_VAR]?.trim() || DEFAULT_DEMO_OPERATOR_EMAIL);
 
   return {
     status: "ready",
-    merchantId: DEMO_MERCHANT_ID,
-    merchantName: DEMO_MERCHANT_NAME,
-    operatorId: DEMO_OPERATOR_ID,
+    merchantId: identity.merchantId,
+    merchantName: identity.merchantName,
+    operatorId: identity.operatorId,
     operatorEmail,
     operatorPassword,
-    experimentId: DEMO_EXPERIMENT_ID,
+    experimentId: identity.experimentId,
+    idPrefix: identity.idPrefix,
   };
 }
