@@ -21,7 +21,25 @@ import { mapAuditEvent, type AuditEventDTO } from "./decisionAuditService";
  * any real scale rather than scanning every decision a merchant has ever
  * had.
  */
-export async function getRecentActivity(merchantId: string, limit = 10, decisionWindow = 50): Promise<AuditEventDTO[]> {
+/**
+ * The three entity types this feed can surface. These are exactly the types
+ * `mapAuditEvent` sanitizes and the final `.filter()` below already allowed
+ * through - naming them here exposes an existing capability rather than
+ * widening what the feed can return.
+ */
+export const ACTIVITY_ENTITY_TYPES = ["Decision", "Execution", "Outcome"] as const;
+export type ActivityEntityType = (typeof ACTIVITY_ENTITY_TYPES)[number];
+
+export function isActivityEntityType(value: string | undefined): value is ActivityEntityType {
+  return value !== undefined && (ACTIVITY_ENTITY_TYPES as readonly string[]).includes(value);
+}
+
+export async function getRecentActivity(
+  merchantId: string,
+  limit = 10,
+  decisionWindow = 50,
+  entityTypes: readonly ActivityEntityType[] = ACTIVITY_ENTITY_TYPES,
+): Promise<AuditEventDTO[]> {
   const recentDecisions = await prisma.decision.findMany({
     where: { revenueRiskEvent: { merchantId } },
     orderBy: { decidedAt: "desc" },
@@ -41,19 +59,30 @@ export async function getRecentActivity(merchantId: string, limit = 10, decision
     return [];
   }
 
+  // Each branch is still keyed to ids this merchant was already PROVEN to
+  // own above, so narrowing by entity type can only ever remove rows from
+  // an already merchant-safe set - it can never widen access.
+  const selected = new Set(entityTypes);
+  const idsByType: Record<ActivityEntityType, string[]> = {
+    Decision: decisionIds,
+    Execution: executionIds,
+    Outcome: outcomeIds,
+  };
+  const branches = ACTIVITY_ENTITY_TYPES.filter(
+    (type) => selected.has(type) && idsByType[type].length > 0,
+  ).map((type) => ({ entityType: type, entityId: { in: idsByType[type] } }));
+
+  if (branches.length === 0) {
+    return [];
+  }
+
   const rows = await prisma.auditEvent.findMany({
-    where: {
-      OR: [
-        { entityType: "Decision", entityId: { in: decisionIds } },
-        ...(executionIds.length > 0 ? [{ entityType: "Execution" as const, entityId: { in: executionIds } }] : []),
-        ...(outcomeIds.length > 0 ? [{ entityType: "Outcome" as const, entityId: { in: outcomeIds } }] : []),
-      ],
-    },
+    where: { OR: branches },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: limit,
   });
 
   return rows
-    .filter((row) => row.entityType === "Decision" || row.entityType === "Execution" || row.entityType === "Outcome")
+    .filter((row) => isActivityEntityType(row.entityType))
     .map((row) => mapAuditEvent(row as Parameters<typeof mapAuditEvent>[0]));
 }

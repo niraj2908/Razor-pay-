@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { requireAuthContext } from "@/lib/auth/requireAuthContext";
-import { getRecentActivity } from "@/lib/recovery/activityFeedService";
+import { getRecentActivity, isActivityEntityType } from "@/lib/recovery/activityFeedService";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Timestamp } from "@/components/ui/Timestamp";
 import { humanizeAuditAction, humanizeEnumValue } from "@/lib/design/text";
 import { resolveAuditMarker } from "@/lib/design/auditMarker";
 import { TONE_BORDER, TONE_BG, TONE_ICON } from "@/lib/design/tone";
 import { AuditIcon } from "@/lib/design/icons";
+import { AuditFilters } from "./AuditFilters";
 
 const ACTIVITY_LIMIT = 50;
 const REDUNDANT_DETAIL_KEYS = new Set(["decisionId", "paymentId"]);
@@ -25,13 +26,24 @@ const ENUM_SHAPE = /^[A-Za-z]+(_[A-Za-z]+)*$/;
  * than a silent truncation. A decision's own audit trail page still offers
  * full pagination for anyone who needs the complete history of one case.
  */
-export default async function AuditPage() {
+export default async function AuditPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ entityType?: string }>;
+}) {
   const { merchantId } = await requireAuthContext();
-  const events = await getRecentActivity(merchantId, ACTIVITY_LIMIT, 200);
+  const params = await searchParams;
+  const entityType = isActivityEntityType(params.entityType) ? params.entityType : undefined;
+  const events = await getRecentActivity(merchantId, ACTIVITY_LIMIT, 200, entityType ? [entityType] : undefined);
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title="Audit trail" description="Chronological record of decisions, executions, and outcomes across your merchant." icon={AuditIcon} />
+      <PageHeader
+        title="Audit trail"
+        description="Chronological record of decisions, executions, and outcomes across your merchant."
+        icon={AuditIcon}
+        actions={<AuditFilters entityType={entityType ?? ""} />}
+      />
 
       {events.length === 0 ? (
         <p className="text-fg-muted py-8 text-center text-sm italic">No audit events recorded yet.</p>
