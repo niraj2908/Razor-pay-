@@ -105,11 +105,22 @@ export function LoginForm({ demoErrorMessage = null }: { demoErrorMessage?: stri
         </Link>
       </p>
 
-      <div className="border-border mt-1 flex flex-col items-center gap-1.5 border-t pt-4">
-        <p className="text-fg-muted text-xs">Evaluating the product? No account needed.</p>
-        <Link href="/demo" className="text-info text-sm font-medium hover:underline">
-          Explore Demo
+      {/* Evaluating is the most likely reason someone is on this page, and
+          it is the one path that needs no credentials - so it reads as a
+          real action rather than as fine print under the form. Sign-in stays
+          the primary-styled control for the operators who actually have an
+          account. */}
+      <div className="border-border mt-1 flex flex-col gap-2 border-t pt-4">
+        <p className="text-fg-secondary text-sm">Evaluating the product? No account needed.</p>
+        <Link
+          href="/demo"
+          className="border-border bg-surface text-fg hover:bg-surface-subtle flex h-10 w-full items-center justify-center rounded-md border text-sm font-medium"
+        >
+          Explore the demo workspace
         </Link>
+        <p className="text-fg-muted text-xs">
+          Opens a populated, clearly-labelled synthetic workspace. No real customer payments.
+        </p>
         {demoErrorMessage ? (
           <p role="alert" className="text-danger text-xs">
             {demoErrorMessage}
