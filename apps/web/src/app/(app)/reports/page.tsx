@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { RecoveryDecision } from "@prisma/client";
 import { requireAuthContext } from "@/lib/auth/requireAuthContext";
 import { validateDateRange } from "@/lib/recovery/overviewService";
 import { getReportData } from "@/lib/reports/reportingService";
@@ -7,6 +8,7 @@ import { Money } from "@/components/ui/Money";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Timestamp } from "@/components/ui/Timestamp";
 import { ComparisonBar } from "@/components/ui/ComparisonBar";
+import { SegmentedBar } from "@/components/ui/SegmentedBar";
 import { formatPaiseAsInr } from "@/lib/design/money";
 import { formatPercentOrUnavailable } from "@/lib/design/percent";
 import { humanizeEnumValue, humanizeAuditAction } from "@/lib/design/text";
@@ -15,6 +17,16 @@ import { ReportsIcon, WalletIcon, TrendUpIcon, OutcomeIcon, PaymentIcon } from "
 import { ReportFilters } from "./ReportFilters";
 
 const MAX_EXPERIMENTS_SHOWN_NOTE = 10;
+
+/** Same decision-type colours the Overview's own decision-mix bar uses, so
+ * a reader moving between the dashboard and the report sees one consistent
+ * visual language rather than two competing ones. */
+const DECISION_MIX_BG: Record<RecoveryDecision, string> = {
+  ACT: "bg-success",
+  WAIT: "bg-info",
+  STOP: "bg-danger",
+  ESCALATE: "bg-warning",
+};
 
 /**
  * Operations Report (Phase 28C). One page, six honest sections, matching
@@ -38,6 +50,8 @@ export default async function ReportsPage({
 
   const sinceInputValue = params.since ?? "";
   const untilInputValue = params.until ?? "";
+  const decisionMixTotal =
+    report.decisionMix.ACT + report.decisionMix.WAIT + report.decisionMix.STOP + report.decisionMix.ESCALATE;
 
   return (
     <div className="flex flex-col gap-6">
@@ -164,14 +178,40 @@ export default async function ReportsPage({
       {/* 4. DECISION ANALYSIS */}
       <section className="border-border flex flex-col gap-4 rounded-lg border p-5">
         <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">4. Decision analysis</h2>
-        <div className="flex flex-wrap gap-6">
-          {(["ACT", "WAIT", "STOP", "ESCALATE"] as const).map((type) => (
-            <div key={type} className="flex items-center gap-2">
-              <StatusBadge {...DECISION_STATUS[type]} />
-              <span className="text-fg font-mono text-sm font-medium tabular-nums">{report.decisionMix[type]}</span>
+        {decisionMixTotal === 0 ? (
+          <p className="text-fg-muted text-sm italic">No open candidates have a decision yet.</p>
+        ) : (
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            {/* Proportional split - the same SegmentedBar and the same
+                getDecisionMix() figures the Overview renders, so the report
+                and the dashboard can never visually disagree. */}
+            <div>
+              <SegmentedBar
+                segments={(["ACT", "WAIT", "STOP", "ESCALATE"] as RecoveryDecision[]).map((type) => ({
+                  label: DECISION_STATUS[type].label,
+                  value: report.decisionMix[type],
+                  displayValue: String(report.decisionMix[type]),
+                  className: DECISION_MIX_BG[type],
+                }))}
+              />
+              <p className="text-fg-muted mt-3 text-xs">
+                The Decision Engine&apos;s most recent call on each of the {decisionMixTotal} currently-open recovery candidates.
+              </p>
             </div>
-          ))}
-        </div>
+            {/* Icon + label + count retained alongside the bar: status must
+                never be communicated by colour alone. */}
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-3 self-start">
+              {(["ACT", "WAIT", "STOP", "ESCALATE"] as const).map((type) => (
+                <div key={type} className="flex items-center justify-between gap-3">
+                  <dt>
+                    <StatusBadge {...DECISION_STATUS[type]} />
+                  </dt>
+                  <dd className="text-fg font-mono text-sm font-medium tabular-nums">{report.decisionMix[type]}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        )}
       </section>
 
       {/* 5. EXPERIMENT EVIDENCE */}
@@ -182,26 +222,68 @@ export default async function ReportsPage({
         ) : (
           <ul className="divide-border flex flex-col divide-y">
             {report.experiments.map((experiment) => (
-              <li key={experiment.id} className="flex items-center justify-between gap-3 py-3">
-                <div className="flex min-w-0 flex-col gap-1">
+              <li key={experiment.id} className="flex flex-col gap-3 py-4 first:pt-0">
+                <div className="flex items-center justify-between gap-3">
                   <Link href={`/experiments/${experiment.id}`} className="text-info truncate text-sm font-medium hover:underline">
                     {experiment.name}
                   </Link>
-                  <div className="flex items-center gap-2">
-                    <StatusBadge {...EXPERIMENT_STATUS[experiment.status]} />
-                    {experiment.latestResult ? (
-                      <span className="text-fg-muted text-xs">
-                        Treatment {formatPercentOrUnavailable(experiment.latestResult.treatment.rate)} vs. control{" "}
-                        {formatPercentOrUnavailable(experiment.latestResult.control.rate)}
-                      </span>
-                    ) : (
-                      <span className="text-fg-muted text-xs italic">No result yet</span>
-                    )}
-                  </div>
+                  <StatusBadge {...EXPERIMENT_STATUS[experiment.status]} />
                 </div>
-                {experiment.latestResult?.incrementalEstimate.status === "available" ? (
-                  <Money value={{ kind: "amount", paise: experiment.latestResult.incrementalEstimate.estimatedIncrementalGMVPaise }} size="sm" />
-                ) : null}
+                {experiment.latestResult ? (
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                    {/* Treatment vs control, the same ComparisonBar the
+                        Experiment Detail screen uses - every exact value is
+                        printed beside its bar, so this is also the accessible
+                        representation, not a decorative graphic. */}
+                    <div>
+                      <h3 className="text-fg-muted mb-2 text-[11px] font-medium tracking-wide uppercase">Recovery rate</h3>
+                      <ComparisonBar
+                        items={[
+                          {
+                            label: "Treatment",
+                            value: experiment.latestResult.treatment.rate ?? 0,
+                            displayValue: formatPercentOrUnavailable(experiment.latestResult.treatment.rate),
+                            className: "bg-treatment",
+                          },
+                          {
+                            label: "Control",
+                            value: experiment.latestResult.control.rate ?? 0,
+                            displayValue: formatPercentOrUnavailable(experiment.latestResult.control.rate),
+                            className: "bg-control",
+                          },
+                        ]}
+                      />
+                      <p className="text-fg-muted mt-2 text-xs">
+                        An observed difference between arms — not on its own a causal claim.
+                      </p>
+                    </div>
+                    <div>
+                      <h3 className="text-fg-muted mb-2 text-[11px] font-medium tracking-wide uppercase">
+                        Incremental recovered GMV (causal)
+                      </h3>
+                      {experiment.latestResult.incrementalEstimate.status === "available" ? (
+                        <>
+                          <Money
+                            value={{ kind: "amount", paise: experiment.latestResult.incrementalEstimate.estimatedIncrementalGMVPaise }}
+                            size="md"
+                          />
+                          <p className="text-fg-secondary mt-1 text-xs">
+                            Validated as a statistically confirmed effect. Actual treatment GMV{" "}
+                            {formatPaiseAsInr(experiment.latestResult.treatment.recoveredGMVPaise)} vs. estimated counterfactual{" "}
+                            {formatPaiseAsInr(experiment.latestResult.incrementalEstimate.estimatedCounterfactualTreatmentGMVPaise)}.
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-fg-muted text-sm italic">
+                          Not available — this result does not meet the threshold for a validated causal effect, so no
+                          incremental figure is reported.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-fg-muted text-sm italic">No measurement result computed yet.</p>
+                )}
               </li>
             ))}
           </ul>

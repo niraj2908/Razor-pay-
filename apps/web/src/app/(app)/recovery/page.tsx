@@ -40,7 +40,20 @@ export default async function RecoveryQueuePage({
 
   const status = isValidStatusFilter(params.status) ? params.status : "open";
   const decisionType = isValidDecisionType(params.decisionType) ? params.decisionType : undefined;
-  const result = await listRecoveryQueue(merchantId, { status, decisionType, cursor: params.cursor });
+  // Highest amount at risk first. `listRecoveryQueue`'s own default is
+  // oldest-detected-first, which is a reasonable API default but the wrong
+  // one for a triage screen: with a large cohort of similar low-value
+  // candidates it fills the entire first page with near-identical rows and
+  // buries both the highest-value work and the decision-type variety. An
+  // operator opening this queue should see the biggest money first.
+  // Passed explicitly here rather than changing the service default, so the
+  // API contract every other caller relies on is untouched.
+  const result = await listRecoveryQueue(merchantId, {
+    status,
+    decisionType,
+    sort: "amountAtRisk_desc",
+    cursor: params.cursor,
+  });
 
   return (
     <div className="flex flex-col gap-6">
