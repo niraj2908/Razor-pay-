@@ -10,7 +10,8 @@
     "typecheck": "turbo run typecheck",
     "db:migrate": "prisma migrate dev --schema=prisma/schema.prisma",
     "db:generate": "prisma generate --schema=prisma/schema.prisma",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "postinstall": "prisma generate --schema=prisma/schema.prisma"
   },
   "devDependencies": {
     "prisma": "5.22.0",

@@ -10,6 +10,20 @@ import { renderReportPdf } from "@/lib/reports/pdfReport";
 // runtime - identical reasoning to every other Prisma-touching route.
 export const runtime = "nodejs";
 
+// Explicit upper bound on this route's server execution time, in seconds
+// (Next.js route segment config; deployment platforms read it from the build
+// output). This is the ONE route that combines several aggregation queries
+// with synchronous PDF rendering, so it is the only one that can plausibly
+// approach a platform's default function timeout - every other route is a
+// single scoped query.
+//
+// 60s is a deliberate ceiling, not an expected duration: observed end-to-end
+// export time is ~2-3s. The headroom covers a cold start plus the multi-second
+// pooled-connection latency spikes this deployment's managed Postgres has been
+// measured to exhibit under load. It bounds a worst case; it does not slow the
+// normal path, and it changes no report logic.
+export const maxDuration = 60;
+
 /**
  * GET /api/reports/export?format=csv|pdf&since=...&until=... (Phase 28C).
  *
