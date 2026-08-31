@@ -1,0 +1,23 @@
+# Everything here is a local build artifact or dependency tree that Vercel
+# rebuilds itself on the build machine. Without this file the CLI uploads the
+# whole 3.6GB working directory and the deploy is rejected outright: the
+# per-file 100MB limit is exceeded by the platform-specific @next/swc
+# binaries, the Turborepo cache archive, and the Turbopack dev cache.
+node_modules
+.next
+.turbo
+out
+dist
+build
+
+# Local env files never belong in a deployment upload - runtime configuration
+# is supplied by Vercel environment variables instead.
+.env
+.env.*
+!.env.example
+
+# Local-only noise
+.git
+*.log
+.DS_Store
+coverage
