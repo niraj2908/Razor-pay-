@@ -150,7 +150,11 @@ afterAll(async () => {
   await prisma.experimentAssignment.deleteMany({ where: { experimentId: { in: createdExperimentIds } } });
   await prisma.experiment.deleteMany({ where: { id: { in: createdExperimentIds } } });
   await prisma.$disconnect();
-});
+  // Nine sequential deletes plus a disconnect against a real remote
+  // Postgres - vitest's default 10s hook timeout is not enough under the
+  // same full-suite pooler contention described on the test below, and a
+  // timed-out cleanup hook would leak fixture rows into other files.
+}, 60_000);
 
 describe("computeExperimentResult against a real database", () => {
   it("computes a full, correctly-isolated result across a synthetic multi-scenario experiment", async () => {
@@ -286,7 +290,16 @@ describe("computeExperimentResult against a real database", () => {
     }
 
     void guestSuccess;
-  }, 30_000);
+    // Builds a large multi-scenario fixture (two merchants, two experiments,
+    // customer/guest assignments, decisions, executions and outcomes) before
+    // computing a result, so this is genuinely slow against a real remote
+    // Postgres - observed ~25s even running ALONE. The previous 30s left
+    // almost no margin and timed out under full-suite Supabase pooler
+    // contention, where every other integration file competes for the same
+    // connection pool. Generous ceiling, matching the margins already used
+    // in seedDemoWorkspace.integration.test.ts - this bounds a genuinely
+    // long operation, it does not paper over a slow query.
+  }, 180_000);
 
   it("returns experiment_not_found for a nonexistent experiment id without throwing", async () => {
     const outcome = await computeExperimentResult("does_not_exist", 0.95);
