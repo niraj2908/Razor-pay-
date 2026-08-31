@@ -109,6 +109,31 @@ export type DecisionDetailDTO = {
   auditEventId: string | null;
 };
 
+/**
+ * Finds the most recent decision associated with a payment reference
+ * (Phase 28C AI Assistant addition, additive - never modifies
+ * `getDecisionDetail`'s existing contract). A "payment reference" is
+ * either our own `Payment.id` or the Razorpay-issued
+ * `Payment.razorpayPaymentId` - both are things an operator could
+ * plausibly type or paste, unlike an internal `RevenueRiskEvent.id`.
+ * Merchant-scoped identically to every other lookup in this file: the
+ * WHERE clause itself is the isolation boundary, never an app-code filter
+ * after a broader fetch.
+ */
+export async function findDecisionIdByPaymentReference(merchantId: string, reference: string): Promise<string | null> {
+  const decision = await prisma.decision.findFirst({
+    where: {
+      revenueRiskEvent: {
+        merchantId,
+        payment: { OR: [{ id: reference }, { razorpayPaymentId: reference }] },
+      },
+    },
+    orderBy: { decidedAt: "desc" },
+    select: { id: true },
+  });
+  return decision?.id ?? null;
+}
+
 function extractDecisionContext(details: unknown): { policyVersion: string | null; modelVersion: string | null; reason: string | null } {
   const record = typeof details === "object" && details !== null ? (details as Record<string, unknown>) : {};
   return {

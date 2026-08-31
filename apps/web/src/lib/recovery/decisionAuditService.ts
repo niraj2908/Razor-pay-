@@ -143,7 +143,11 @@ function sanitizeByEntityType(entityType: AuditEntityType, raw: unknown): Record
   }
 }
 
-function mapAuditEvent(row: {
+/** Exported (Phase 28C activity-feed addition) so `activityFeedService.ts`
+ * can reuse the exact same sanitization discipline for a merchant-wide
+ * feed, rather than re-deriving or loosening the per-entityType allowlists
+ * above. Behavior is unchanged - this is a visibility change only. */
+export function mapAuditEvent(row: {
   id: string;
   entityType: string;
   action: string;

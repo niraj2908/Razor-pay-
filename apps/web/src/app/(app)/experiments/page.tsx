@@ -27,7 +27,7 @@ export default async function ExperimentsPage({
   const result = await listExperiments(merchantId, { status, cursor: params.cursor });
 
   return (
-    <div className="flex max-w-4xl flex-col gap-6">
+    <div className="flex flex-col gap-6">
       <PageHeader title="Experiments" description="Randomized recovery experiments and their measurement results." icon={ExperimentIcon} />
 
       {result.items.length === 0 ? (

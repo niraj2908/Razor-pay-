@@ -1,92 +1,123 @@
 import Link from "next/link";
+import type { RecoveryDecision } from "@prisma/client";
 import { requireAuthContext } from "@/lib/auth/requireAuthContext";
-import { getRecoveryOverview } from "@/lib/recovery/overviewService";
+import { getRecoveryOverview, getDecisionMix, getRecoveryOpportunityPaise } from "@/lib/recovery/overviewService";
 import { listRecoveryQueue } from "@/lib/recovery/recoveryQueueService";
-import { PageHeader } from "@/components/ui/PageHeader";
+import { getRecentActivity } from "@/lib/recovery/activityFeedService";
+import type { AuditEventDTO } from "@/lib/recovery/decisionAuditService";
 import { Money } from "@/components/ui/Money";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { Timestamp } from "@/components/ui/Timestamp";
 import { ComparisonBar } from "@/components/ui/ComparisonBar";
 import { SegmentedBar } from "@/components/ui/SegmentedBar";
 import { formatPaiseAsInr } from "@/lib/design/money";
 import { formatPercentOrUnavailable } from "@/lib/design/percent";
-import { humanizeEnumValue } from "@/lib/design/text";
+import { humanizeEnumValue, humanizeAuditAction } from "@/lib/design/text";
 import { DECISION_STATUS } from "@/lib/design/status";
-import { WalletIcon, ExecutionIcon, OutcomeIcon, TrendUpIcon, EscalateIcon, OverviewIcon, RecoveryIcon } from "@/lib/design/icons";
+import { TONE_BORDER, TONE_BG, TONE_ICON } from "@/lib/design/tone";
+import { resolveAuditMarker } from "@/lib/design/auditMarker";
+import {
+  WalletIcon,
+  OutcomeIcon,
+  TrendUpIcon,
+  EscalateIcon,
+  RecoveryIcon,
+  ExecutionIcon,
+  type IconComponent,
+} from "@/lib/design/icons";
 
 /**
- * Recovery Overview - the command center (Phase 26, second visual pass).
- * Every value is read directly from `getRecoveryOverview` or
- * `listRecoveryQueue` (both existing, already-authorized query services) -
- * no invented metric, no chart without a real series behind it, no new
- * backend surface.
+ * Recovery Overview - the product's hero screen (Phase 28C redesign, on top
+ * of the Phase 26 second visual pass). Every value still traces to a real,
+ * already-authorized query service - `getRecoveryOverview`,
+ * `listRecoveryQueue` (both pre-existing) plus two new, additive,
+ * read-only aggregations this phase added (`getDecisionMix`,
+ * `getRecoveryOpportunityPaise` - both plain sums/counts over already-
+ * persisted `Decision` fields, no new estimate, no schema change) and a
+ * new merchant-wide `getRecentActivity` feed (same audit-sanitization
+ * discipline as the per-decision audit trail, generalized).
  *
- * Full-width 12-column composition, not a narrow centered document:
- * RECOVERY PERFORMANCE (8 cols) + OPERATIONAL ATTENTION (4 cols) on row
- * one, RECOVERY ACTIVITY/DISTRIBUTION (7 cols) + RECOVERY FLOW (5 cols) on
- * row two. Each column's width is used for more real content, never
- * stretched empty space - Operational Attention is the merchant's own
- * highest-value open candidates (a real `listRecoveryQueue` call sorted by
- * amount at risk), not a decorative panel.
+ * Tells the product story top to bottom: the hero KPI strip is the
+ * headline (risk / opportunity / recovered), Recovery Performance and
+ * Decision Mix explain HOW the system is currently reasoning about that
+ * risk, Recovery Activity is EVIDENCE that it actually acted, and
+ * Operational Attention is what still needs a human.
  *
- * Two things this page explicitly does NOT chart, and why: (1) a
- * time-based recovery trend - `getRecoveryOverview` returns only current-
- * state/windowed aggregates, never a time-series; (2) a full candidate ->
- * decision -> execution -> outcome funnel - `candidatesCount` is an
- * unwindowed current snapshot while `interventionsAttempted`/
- * `interventionsSucceeded`/`interventionRecoveryCount` are windowed by
- * execution/outcome timestamps (see overviewService's own doc comment);
- * mixing them in one bar would misrepresent them as the same cohort. The
- * "Recovery flow" below uses only the three windowed, causally-connected
- * intervention numbers the API actually returns - not a claim about the
- * full lifecycle, which the API doesn't expose as one connected count.
+ * Still does NOT chart a time-series trend or a full candidate-to-outcome
+ * funnel - `getRecoveryOverview` returns only current-state/windowed
+ * aggregates, never a time-series, and mixing an unwindowed current count
+ * with windowed execution/outcome counts in one funnel would misrepresent
+ * them as the same cohort (see the previous version of this file's own
+ * finding). Both are left out rather than faked, per this phase's own
+ * "real data only" rule.
  */
 export default async function OverviewPage() {
   const { merchantId } = await requireAuthContext();
-  const [overview, attention] = await Promise.all([
+  const [overview, attention, decisionMix, recoveryOpportunityPaise, activity] = await Promise.all([
     getRecoveryOverview(merchantId, {}),
     listRecoveryQueue(merchantId, { status: "open", sort: "amountAtRisk_desc", limit: 5 }),
+    getDecisionMix(merchantId),
+    getRecoveryOpportunityPaise(merchantId),
+    getRecentActivity(merchantId, 8),
   ]);
 
-  const hasAttention = overview.operational.candidatesCount > 0;
+  const recoveredTotalPaise = overview.attributedOutcomes.naturalRecoveryGmvPaise + overview.attributedOutcomes.interventionRecoveryGmvPaise;
+  const decisionMixTotal = decisionMix.ACT + decisionMix.WAIT + decisionMix.STOP + decisionMix.ESCALATE;
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title="Overview" description="Current recovery operations for your merchant." icon={OverviewIcon} />
+      <div>
+        <h1 className="text-fg text-2xl font-semibold tracking-tight">Revenue Recovery Intelligence</h1>
+        <p className="text-fg-secondary mt-1 text-sm">
+          Payment failures, evaluated for risk, decided on by policy, acted upon, and measured for real recovered revenue - for your
+          merchant, right now.
+        </p>
+      </div>
+
+      {/* HERO KPI STRIP */}
+      {/* 2-up before 3-up (Phase 28C visual QA fix): at 3 columns starting
+          as early as `sm` (640px), a large `Money` figure like
+          "₹1,17,598.25" routinely overflowed its ~1/3-width column and
+          visibly overlapped its neighbor in the 640-1279px range - a real,
+          visible rendering bug on a genuinely common laptop/window width,
+          not a hypothetical edge case. Widening to 2-up until `xl` gives
+          each figure real room before ever squeezing to three across. */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <HeroStat
+          icon={WalletIcon}
+          tone="warning"
+          label="Revenue at risk"
+          value={<Money value={{ kind: "amount", paise: overview.operational.revenueAtRiskPaise }} size="lg" />}
+          note={`${overview.operational.candidatesCount} open ${overview.operational.candidatesCount === 1 ? "candidate" : "candidates"}`}
+        />
+        <HeroStat
+          icon={TrendUpIcon}
+          tone="info"
+          label="Recovery opportunity"
+          value={<Money value={{ kind: "amount", paise: recoveryOpportunityPaise }} size="lg" />}
+          note="Expected incremental value of currently open decisions"
+        />
+        <HeroStat
+          icon={OutcomeIcon}
+          tone="success"
+          label="Recovered"
+          value={<Money value={{ kind: "amount", paise: recoveredTotalPaise }} size="lg" />}
+          note={`${overview.attributedOutcomes.recoveredCount} of ${overview.attributedOutcomes.matureOutcomesCount} mature outcomes`}
+        />
+      </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
         {/* RECOVERY PERFORMANCE */}
-        <section className="border-border bg-info/[0.03] flex flex-col gap-5 rounded-lg border p-5 xl:col-span-8">
-          <div className="flex items-center gap-2">
-            <span className="bg-info/10 text-info flex h-6 w-6 shrink-0 items-center justify-center rounded-sm">
-              <WalletIcon aria-hidden="true" className="h-3.5 w-3.5" />
-            </span>
-            <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Recovery performance</h2>
-          </div>
+        <section className="border-border bg-info/[0.03] flex flex-col gap-5 rounded-lg border p-5 xl:col-span-7">
+          <SectionHeading icon={WalletIcon} tone="info" title="Recovery performance" />
 
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-            <div>
-              <h3 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Revenue at risk now</h3>
-              <div className="mt-1">
-                <Money value={{ kind: "amount", paise: overview.operational.revenueAtRiskPaise }} size="lg" />
-              </div>
-              <p className="mt-2 flex items-center gap-1.5 text-sm">
-                {hasAttention ? <EscalateIcon aria-hidden="true" className="text-warning h-3.5 w-3.5 shrink-0" /> : null}
-                <span className={hasAttention ? "text-fg-secondary" : "text-fg-muted"}>
-                  {overview.operational.candidatesCount} open recovery{" "}
-                  {overview.operational.candidatesCount === 1 ? "candidate" : "candidates"}
-                  {hasAttention ? " requiring attention" : ""}
-                </span>
-              </p>
-            </div>
-
-            <div>
-              <h3 className="text-fg-muted flex items-center gap-1.5 text-[11px] font-medium tracking-wider uppercase">
-                <TrendUpIcon aria-hidden="true" className="h-3.5 w-3.5" />
-                Incremental recovery
-              </h3>
-              <div className="mt-1">
-                <IncrementalRecoverySummary result={overview.incrementalRecovery} />
-              </div>
+          <div>
+            <h3 className="text-fg-muted flex items-center gap-1.5 text-[11px] font-medium tracking-wider uppercase">
+              <TrendUpIcon aria-hidden="true" className="h-3.5 w-3.5" />
+              Incremental recovery (causal)
+            </h3>
+            <div className="mt-1">
+              <IncrementalRecoverySummary result={overview.incrementalRecovery} />
             </div>
           </div>
 
@@ -118,13 +149,8 @@ export default async function OverviewPage() {
         </section>
 
         {/* OPERATIONAL ATTENTION */}
-        <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-4">
-          <div className="flex items-center gap-2">
-            <span className="bg-warning/10 text-warning flex h-6 w-6 shrink-0 items-center justify-center rounded-sm">
-              <EscalateIcon aria-hidden="true" className="h-3.5 w-3.5" />
-            </span>
-            <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Operational attention</h2>
-          </div>
+        <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-5">
+          <SectionHeading icon={EscalateIcon} tone="warning" title="Operational attention" />
           {attention.items.length === 0 ? (
             <p className="text-fg-muted text-sm italic">No open recovery candidates right now.</p>
           ) : (
@@ -164,70 +190,136 @@ export default async function OverviewPage() {
           </Link>
         </section>
 
-        {/* RECOVERY ACTIVITY / DISTRIBUTION */}
-        <section className="border-border flex flex-col gap-5 rounded-lg border p-5 xl:col-span-7">
-          <div className="flex items-center gap-2">
-            <OutcomeIcon aria-hidden="true" className="text-fg-muted h-4 w-4" />
-            <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Recovery activity &amp; distribution</h2>
-          </div>
+        {/* DECISION MIX */}
+        <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-4">
+          <SectionHeading icon={DECISION_STATUS.ACT.icon} tone="neutral" title="Decision mix" />
+          {decisionMixTotal === 0 ? (
+            <p className="text-fg-muted text-sm italic">No open candidates have a decision yet.</p>
+          ) : (
+            <>
+              <SegmentedBar
+                segments={(["ACT", "WAIT", "STOP", "ESCALATE"] as RecoveryDecision[]).map((type) => ({
+                  label: DECISION_STATUS[type].label,
+                  value: decisionMix[type],
+                  displayValue: String(decisionMix[type]),
+                  className: DECISION_MIX_BG[type],
+                }))}
+              />
+              <p className="text-fg-muted text-xs">The Decision Engine&apos;s most recent call on each currently-open recovery candidate.</p>
+            </>
+          )}
+        </section>
+
+        {/* OUTCOME DISTRIBUTION */}
+        <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-4">
+          <SectionHeading icon={OutcomeIcon} tone="neutral" title="Outcome distribution" />
           {overview.attributedOutcomes.matureOutcomesCount === 0 ? (
             <p className="text-fg-muted text-sm italic">No outcomes have matured in this period yet.</p>
           ) : (
             <>
-              <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 text-sm">
-                <span className="text-fg">
-                  <span className="font-mono font-medium tabular-nums">{overview.attributedOutcomes.recoveredCount}</span>{" "}
-                  recovered of{" "}
-                  <span className="font-mono font-medium tabular-nums">{overview.attributedOutcomes.matureOutcomesCount}</span>{" "}
-                  mature
-                </span>
-                <span className="text-fg-secondary">
-                  Observed recovery rate:{" "}
-                  <span className="font-mono font-medium tabular-nums">
-                    {formatPercentOrUnavailable(overview.attributedOutcomes.observedRecoveryRate)}
-                  </span>
+              <div className="text-fg-secondary text-sm">
+                Observed recovery rate:{" "}
+                <span className="font-mono font-medium tabular-nums">
+                  {formatPercentOrUnavailable(overview.attributedOutcomes.observedRecoveryRate)}
                 </span>
               </div>
-              <div>
-                <h3 className="text-fg-muted mb-2 text-xs font-medium">Recovered outcomes by attribution</h3>
-                <SegmentedBar
-                  segments={[
-                    { label: "Natural", value: overview.attributedOutcomes.naturalRecoveryCount, displayValue: String(overview.attributedOutcomes.naturalRecoveryCount), className: "bg-recovery-natural" },
-                    { label: "Intervention", value: overview.attributedOutcomes.interventionRecoveryCount, displayValue: String(overview.attributedOutcomes.interventionRecoveryCount), className: "bg-recovery-intervention" },
-                    { label: "Unknown", value: overview.attributedOutcomes.unknownAttributionCount, displayValue: String(overview.attributedOutcomes.unknownAttributionCount), className: "bg-unknown" },
-                  ]}
-                />
-              </div>
+              <SegmentedBar
+                segments={[
+                  { label: "Natural", value: overview.attributedOutcomes.naturalRecoveryCount, displayValue: String(overview.attributedOutcomes.naturalRecoveryCount), className: "bg-recovery-natural" },
+                  { label: "Intervention", value: overview.attributedOutcomes.interventionRecoveryCount, displayValue: String(overview.attributedOutcomes.interventionRecoveryCount), className: "bg-recovery-intervention" },
+                  { label: "Unknown", value: overview.attributedOutcomes.unknownAttributionCount, displayValue: String(overview.attributedOutcomes.unknownAttributionCount), className: "bg-unknown" },
+                ]}
+              />
             </>
           )}
         </section>
 
         {/* RECOVERY FLOW */}
-        <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-5">
-          <div className="flex items-center gap-2">
-            <RecoveryIcon aria-hidden="true" className="text-fg-muted h-4 w-4" />
-            <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Recovery flow</h2>
-          </div>
+        <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-4">
+          <SectionHeading icon={RecoveryIcon} tone="neutral" title="Recovery flow" />
           {overview.operational.interventionsAttempted === 0 ? (
             <p className="text-fg-muted text-sm italic">No interventions have been attempted in this period.</p>
           ) : (
-            <>
-              <ComparisonBar
-                maxValue={overview.operational.interventionsAttempted}
-                items={[
-                  { label: "Attempted", value: overview.operational.interventionsAttempted, displayValue: String(overview.operational.interventionsAttempted), className: "bg-fg-muted" },
-                  { label: "Succeeded", value: overview.operational.interventionsSucceeded, displayValue: String(overview.operational.interventionsSucceeded), className: "bg-info" },
-                  { label: "Recovered (intervention)", value: overview.attributedOutcomes.interventionRecoveryCount, displayValue: String(overview.attributedOutcomes.interventionRecoveryCount), className: "bg-success" },
-                ]}
-              />
-              <p className="text-fg-muted text-xs">
-                Attempted and succeeded are counted by execution; recovered is counted separately by attributed outcome - not a strict
-                per-unit funnel, but the three real stages this system tracks for interventions.
-              </p>
-            </>
+            <ComparisonBar
+              maxValue={overview.operational.interventionsAttempted}
+              items={[
+                { label: "Attempted", value: overview.operational.interventionsAttempted, displayValue: String(overview.operational.interventionsAttempted), className: "bg-fg-muted" },
+                { label: "Succeeded", value: overview.operational.interventionsSucceeded, displayValue: String(overview.operational.interventionsSucceeded), className: "bg-info" },
+                { label: "Recovered", value: overview.attributedOutcomes.interventionRecoveryCount, displayValue: String(overview.attributedOutcomes.interventionRecoveryCount), className: "bg-success" },
+              ]}
+            />
+          )}
+        </section>
+
+        {/* RECOVERY ACTIVITY */}
+        <section className="border-border flex flex-col gap-4 rounded-lg border p-5 xl:col-span-12">
+          <SectionHeading icon={ExecutionIcon} tone="neutral" title="Recovery activity" />
+          {activity.length === 0 ? (
+            <p className="text-fg-muted text-sm italic">No decisions, executions, or outcomes recorded yet.</p>
+          ) : (
+            <ol className="divide-border grid grid-cols-1 divide-y sm:grid-cols-2 sm:gap-x-8 sm:divide-y-0 xl:grid-cols-4">
+              {activity.map((event) => (
+                <ActivityRow key={event.id} event={event} />
+              ))}
+            </ol>
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+const DECISION_MIX_BG: Record<RecoveryDecision, string> = {
+  ACT: "bg-success",
+  WAIT: "bg-info",
+  STOP: "bg-danger",
+  ESCALATE: "bg-warning",
+};
+
+function HeroStat({
+  icon: Icon,
+  tone,
+  label,
+  value,
+  note,
+}: {
+  icon: IconComponent;
+  tone: "warning" | "info" | "success";
+  label: string;
+  value: React.ReactNode;
+  note: string;
+}) {
+  const toneBg = tone === "warning" ? "bg-warning/10 text-warning" : tone === "info" ? "bg-info/10 text-info" : "bg-success/10 text-success";
+  return (
+    <div className="border-border rounded-lg border p-5">
+      <div className="mb-3 flex items-center gap-2">
+        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-sm ${toneBg}`}>
+          <Icon aria-hidden="true" className="h-3.5 w-3.5" />
+        </span>
+        <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">{label}</h2>
+      </div>
+      {value}
+      <p className="text-fg-muted mt-2 text-sm">{note}</p>
+    </div>
+  );
+}
+
+function SectionHeading({
+  icon: Icon,
+  tone,
+  title,
+}: {
+  icon: IconComponent;
+  tone: "info" | "warning" | "neutral";
+  title: string;
+}) {
+  const toneBg = tone === "info" ? "bg-info/10 text-info" : tone === "warning" ? "bg-warning/10 text-warning" : "bg-surface-subtle text-fg-muted";
+  return (
+    <div className="flex items-center gap-2">
+      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-sm ${toneBg}`}>
+        <Icon aria-hidden="true" className="h-3.5 w-3.5" />
+      </span>
+      <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">{title}</h2>
     </div>
   );
 }
@@ -254,4 +346,23 @@ function IncrementalRecoverySummary({
   };
 
   return <p className="text-fg-muted text-sm italic">{REASON_COPY[result.reason]}</p>;
+}
+
+function ActivityRow({ event }: { event: AuditEventDTO }) {
+  const marker = resolveAuditMarker(event);
+  const MarkerIcon = marker.icon;
+  return (
+    <li className="flex items-start gap-2.5 py-2.5 sm:py-1.5">
+      <span
+        aria-hidden="true"
+        className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border ${TONE_BORDER[marker.tone]} ${TONE_BG[marker.tone]}`}
+      >
+        <MarkerIcon aria-hidden="true" className={`h-3 w-3 ${TONE_ICON[marker.tone]}`} />
+      </span>
+      <div className="min-w-0">
+        <div className="text-fg truncate text-sm font-medium">{humanizeAuditAction(event.action)}</div>
+        <Timestamp iso={event.createdAt} className="text-fg-muted text-xs" />
+      </div>
+    </li>
+  );
 }

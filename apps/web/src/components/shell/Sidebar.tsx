@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LogoutButton } from "./LogoutButton";
-import { OverviewIcon, RecoveryIcon, ExperimentIcon } from "@/lib/design/icons";
+import { OverviewIcon, RecoveryIcon, ExperimentIcon, AssistantIcon, ConnectedIcon, PendingIcon, ReportsIcon, SecurityIcon, AuditIcon } from "@/lib/design/icons";
+import type { RazorpayConnectionState } from "@/lib/razorpay/connectionStatus";
 
 /**
  * Primary product navigation (Phase 26 Phase B RESET, icon language added
@@ -27,9 +28,18 @@ export const NAV_ITEMS = [
   { href: "/overview", label: "Overview", icon: OverviewIcon },
   { href: "/recovery", label: "Recovery", icon: RecoveryIcon },
   { href: "/experiments", label: "Experiments", icon: ExperimentIcon },
+  { href: "/reports", label: "Reports", icon: ReportsIcon },
+  { href: "/audit", label: "Audit", icon: AuditIcon },
+  { href: "/security", label: "Security & Policies", icon: SecurityIcon },
 ] as const;
 
-export function Sidebar({ operatorEmail }: { operatorEmail: string | null }) {
+export function Sidebar({
+  operatorEmail,
+  razorpayState = null,
+}: {
+  operatorEmail: string | null;
+  razorpayState?: RazorpayConnectionState | null;
+}) {
   const pathname = usePathname();
 
   return (
@@ -64,10 +74,40 @@ export function Sidebar({ operatorEmail }: { operatorEmail: string | null }) {
               </Link>
             );
           })}
+          {/* AI Operational Assistant (Phase 28C): now a real, working entry
+              point - a deterministic, read-only, evidence-grounded Q&A
+              surface (see assistantService.ts's own doc comment for why it
+              is not a generative chatbot), not a placeholder. Kept visually
+              distinct (a top border, slight vertical separation) from the
+              three primary workflow screens above it - it is a supporting
+              tool, not a fourth peer navigation destination. */}
+          <Link
+            href="/assistant"
+            aria-current={pathname === "/assistant" || pathname?.startsWith("/assistant/") ? "page" : undefined}
+            className={[
+              "border-border mt-2 flex items-center gap-2 rounded-r-sm border-t border-l-2 px-3 pt-2.5 pb-1.5 text-[13px] transition-colors duration-150",
+              pathname === "/assistant" || pathname?.startsWith("/assistant/")
+                ? "border-l-info bg-info/[0.06] text-fg font-medium"
+                : "text-fg-secondary hover:text-fg hover:bg-surface-subtle border-l-transparent font-normal",
+            ].join(" ")}
+          >
+            <AssistantIcon aria-hidden="true" className={`h-4 w-4 shrink-0 ${pathname === "/assistant" ? "text-info" : "text-fg-muted"}`} />
+            AI Assistant
+          </Link>
         </nav>
       </div>
 
-      <div className="border-border flex flex-col gap-1 border-t px-4 py-3">
+      <div className="border-border flex flex-col gap-1.5 border-t px-4 py-3">
+        {razorpayState ? (
+          <span className="text-fg-muted flex items-center gap-1.5 text-[11px]">
+            {razorpayState.status === "connected" ? (
+              <ConnectedIcon aria-hidden="true" className="text-success h-3 w-3 shrink-0" />
+            ) : (
+              <PendingIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
+            )}
+            Razorpay: {razorpayState.status === "connected" ? "Connected" : "Not configured"}
+          </span>
+        ) : null}
         <span className="text-fg-secondary truncate text-xs">{operatorEmail ?? "Not signed in"}</span>
         {operatorEmail ? <LogoutButton /> : null}
       </div>

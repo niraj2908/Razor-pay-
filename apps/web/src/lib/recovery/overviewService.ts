@@ -1,3 +1,4 @@
+import type { RecoveryDecision } from "@prisma/client";
 import { prisma } from "@/lib/db";
 
 /**
@@ -292,4 +293,62 @@ export async function getRecoveryOverview(merchantId: string, query: RecoveryOve
     },
     incrementalRecovery,
   };
+}
+
+/**
+ * Decision-type breakdown across this merchant's currently OPEN recovery
+ * candidates (Phase 28C Overview redesign, additive - never modifies
+ * `getRecoveryOverview`'s existing return shape or any existing caller).
+ * Same current-state, unwindowed framing as `operational.candidatesCount`
+ * above: "what does the queue look like right now," not a historical
+ * count. A RevenueRiskEvent can have at most the decisions actually
+ * persisted for it; this counts the LATEST decision per open risk event
+ * (mirroring `recoveryQueueService.ts`'s own "most recent decision per
+ * candidate" convention), never double-counting a re-decided candidate.
+ */
+export type DecisionMix = Record<RecoveryDecision, number>;
+
+export async function getDecisionMix(merchantId: string): Promise<DecisionMix> {
+  const openRiskEvents = await prisma.revenueRiskEvent.findMany({
+    where: { merchantId, resolvedAt: null },
+    select: {
+      decisions: {
+        orderBy: { decidedAt: "desc" },
+        take: 1,
+        select: { decisionType: true },
+      },
+    },
+  });
+
+  const mix: DecisionMix = { ACT: 0, WAIT: 0, STOP: 0, ESCALATE: 0 };
+  for (const event of openRiskEvents) {
+    const latest = event.decisions[0];
+    if (latest) mix[latest.decisionType] += 1;
+  }
+  return mix;
+}
+
+/**
+ * Sum of `expectedIncrementalValuePaise` across this merchant's currently
+ * open candidates' latest decisions (Phase 28C Overview redesign,
+ * additive). This is a real, already-persisted field on `Decision` -
+ * summing it is not a new estimate or invented metric, just an honest
+ * total of a value the Decision Engine already computed per-candidate.
+ * Decisions with a null expected value (WAIT/STOP/ESCALATE do not
+ * ordinarily set one) contribute zero, never treated as missing/excluded
+ * from the count the way a null recovery-rate would be.
+ */
+export async function getRecoveryOpportunityPaise(merchantId: string): Promise<number> {
+  const openRiskEvents = await prisma.revenueRiskEvent.findMany({
+    where: { merchantId, resolvedAt: null },
+    select: {
+      decisions: {
+        orderBy: { decidedAt: "desc" },
+        take: 1,
+        select: { expectedIncrementalValue: true },
+      },
+    },
+  });
+
+  return openRiskEvents.reduce((sum, event) => sum + (event.decisions[0]?.expectedIncrementalValue ?? 0), 0);
 }

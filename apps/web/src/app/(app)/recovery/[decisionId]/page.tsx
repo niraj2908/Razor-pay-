@@ -11,12 +11,16 @@ import { ProcessTimeline, type TimelineNode } from "@/components/ui/ProcessTimel
 import { DECISION_STATUS, EXECUTION_STATUS, OUTCOME_STATUS } from "@/lib/design/status";
 import { formatPercentOrUnavailable } from "@/lib/design/percent";
 import { humanizeEnumValue } from "@/lib/design/text";
-import { PendingIcon, ExecutionIcon, OutcomeIcon, AuditIcon, PaymentIcon } from "@/lib/design/icons";
+import { PendingIcon, ExecutionIcon, OutcomeIcon, AuditIcon, PaymentIcon, WalletIcon } from "@/lib/design/icons";
 
 /**
  * Decision Detail - an investigation workbench (Phase 26, second visual
- * pass). The `ProcessTimeline` stays the primary lifecycle anchor at the
- * top, full width. Below it, a two-column desktop composition: LEFT (8
+ * pass; Phase 28C extended the timeline to the full product story). The
+ * `ProcessTimeline` is the primary lifecycle anchor at the top, full width,
+ * now spanning Payment -> Risk detected -> Decision -> Execution -> Outcome
+ * (the first two nodes use `decision.payment.createdAt`/
+ * `decision.revenueRiskEvent.detectedAt`, both already present in the
+ * existing DTO - no backend change). Below it, a two-column desktop composition: LEFT (8
  * cols) is the decision itself and why it was made - recovery opportunity,
  * recommended action, decision context, drivers, model predictions. RIGHT
  * (4 cols, one bordered panel) is supporting context - payment, and a
@@ -51,6 +55,20 @@ export default async function DecisionDetailPage({
   const decision = result.decision;
 
   const timelineNodes: TimelineNode[] = [
+    {
+      icon: PaymentIcon,
+      label: "Payment",
+      tone: "neutral",
+      sublabel: <Timestamp iso={decision.payment.createdAt} className="text-fg-muted text-[11px]" />,
+      done: true,
+    },
+    {
+      icon: WalletIcon,
+      label: "Risk detected",
+      tone: "warning",
+      sublabel: <Timestamp iso={decision.revenueRiskEvent.detectedAt} className="text-fg-muted text-[11px]" />,
+      done: true,
+    },
     {
       icon: DECISION_STATUS[decision.decisionType].icon,
       label: DECISION_STATUS[decision.decisionType].label,
