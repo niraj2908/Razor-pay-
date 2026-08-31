@@ -18,6 +18,7 @@ describe("Phase 28C additive overview/reporting aggregations against a real data
   let merchantId: string;
   let openActDecisionId: string;
   let openWaitDecisionId: string;
+  let executionId: string;
 
   beforeAll(async () => {
     const tag = randomUUID();
@@ -56,10 +57,21 @@ describe("Phase 28C additive overview/reporting aggregations against a real data
     await prisma.auditEvent.create({
       data: { entityType: "Decision", entityId: actDecision.id, action: "decision.act", actorType: "SYSTEM", details: { decisionId: actDecision.id, selectedAction: "ACT" } },
     });
+
+    // A real Execution row plus its audit event, so the entity-type filter
+    // has two genuinely different types to discriminate between rather than
+    // being asserted against a single-type fixture that could not fail.
+    const execution = await prisma.execution.create({
+      data: { decisionId: actDecision.id, paymentId: paymentAct.id, actionType: "PAYMENT_LINK", status: "SUCCEEDED" },
+    });
+    executionId = execution.id;
+    await prisma.auditEvent.create({
+      data: { entityType: "Execution", entityId: execution.id, action: "execution.succeeded", actorType: "SYSTEM", details: { decisionId: actDecision.id } },
+    });
   }, 30_000);
 
   afterAll(async () => {
-    await prisma.auditEvent.deleteMany({ where: { entityId: { in: [openActDecisionId, openWaitDecisionId] } } });
+    await prisma.auditEvent.deleteMany({ where: { entityId: { in: [openActDecisionId, openWaitDecisionId, executionId] } } });
     await prisma.merchant.delete({ where: { id: merchantId } });
     await prisma.$disconnect();
   }, 30_000);
@@ -77,12 +89,50 @@ describe("Phase 28C additive overview/reporting aggregations against a real data
   it("getRecentActivity returns the real, sanitized audit event for this merchant's decision", async () => {
     const activity = await getRecentActivity(merchantId, 10);
     expect(activity.length).toBeGreaterThanOrEqual(1);
-    const event = activity.find((e) => e.details.decisionId === openActDecisionId);
+    // Both the Decision and Execution events carry this decisionId, so the
+    // entity type is part of the identity of the row this test is about.
+    const event = activity.find((e) => e.entityType === "Decision" && e.details.decisionId === openActDecisionId);
     expect(event).toBeDefined();
     expect(event?.entityType).toBe("Decision");
     expect(event?.action).toBe("decision.act");
     // Never exposes a raw field beyond the sanitized allowlist.
     expect(Object.keys(event?.details ?? {}).sort()).toEqual(["decisionId", "selectedAction"].sort());
+  });
+
+  it("getRecentActivity returns every entity type when no filter is given", async () => {
+    const activity = await getRecentActivity(merchantId, 10);
+    expect(new Set(activity.map((e) => e.entityType))).toEqual(new Set(["Decision", "Execution"]));
+  });
+
+  it("getRecentActivity narrows to exactly the requested entity type", async () => {
+    const decisions = await getRecentActivity(merchantId, 10, 50, ["Decision"]);
+    expect(decisions.length).toBe(1);
+    expect(decisions.every((e) => e.entityType === "Decision")).toBe(true);
+
+    const executions = await getRecentActivity(merchantId, 10, 50, ["Execution"]);
+    expect(executions.length).toBe(1);
+    expect(executions[0].entityType).toBe("Execution");
+    expect(executions[0].action).toBe("execution.succeeded");
+  });
+
+  it("getRecentActivity returns nothing for a type this merchant has no events of", async () => {
+    // No Outcome row exists in this fixture, so the Outcome branch is
+    // dropped entirely and the query must short-circuit rather than fall
+    // through to an unconstrained OR that would match every merchant's rows.
+    const outcomes = await getRecentActivity(merchantId, 10, 50, ["Outcome"]);
+    expect(outcomes).toEqual([]);
+  });
+
+  it("filtering by entity type never widens access to another merchant's events", async () => {
+    const tag = randomUUID();
+    const otherMerchant = await prisma.merchant.create({ data: { name: `phase28c-filter-control-${tag}` } });
+    try {
+      for (const type of ["Decision", "Execution", "Outcome"] as const) {
+        expect(await getRecentActivity(otherMerchant.id, 10, 50, [type])).toEqual([]);
+      }
+    } finally {
+      await prisma.merchant.delete({ where: { id: otherMerchant.id } });
+    }
   });
 
   it("getPaymentActivity aggregates real Payment rows by status and method for this merchant only", async () => {
