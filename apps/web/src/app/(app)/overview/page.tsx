@@ -348,9 +348,32 @@ function IncrementalRecoverySummary({
   return <p className="text-fg-muted text-sm italic">{REASON_COPY[result.reason]}</p>;
 }
 
+/**
+ * The one detail worth a line in a tile this small, in preference order -
+ * what a Decision chose, what an Execution tried, how an Outcome resolved.
+ * Every key here is already part of `mapAuditEvent`'s per-entityType
+ * allowlist, so this surfaces an existing sanitized field and widens
+ * nothing.
+ *
+ * Without it these tiles carried only the action name, and since outcomes
+ * are the last event in a decision's life, a mature dataset renders eight
+ * identical "Outcome: Created" labels whose only distinguishing signal is
+ * the marker colour.
+ */
+const ACTIVITY_SUMMARY_KEYS = ["selectedAction", "strategy", "outcomeStatus"] as const;
+
+function activitySummary(event: AuditEventDTO): string | null {
+  for (const key of ACTIVITY_SUMMARY_KEYS) {
+    const value = event.details[key];
+    if (typeof value === "string" && value.length > 0) return humanizeEnumValue(value);
+  }
+  return null;
+}
+
 function ActivityRow({ event }: { event: AuditEventDTO }) {
   const marker = resolveAuditMarker(event);
   const MarkerIcon = marker.icon;
+  const summary = activitySummary(event);
   return (
     <li className="flex items-start gap-2.5 py-2.5 sm:py-1.5">
       <span
@@ -361,6 +384,7 @@ function ActivityRow({ event }: { event: AuditEventDTO }) {
       </span>
       <div className="min-w-0">
         <div className="text-fg truncate text-sm font-medium">{humanizeAuditAction(event.action)}</div>
+        {summary ? <div className="text-fg-secondary truncate text-xs">{summary}</div> : null}
         <Timestamp iso={event.createdAt} className="text-fg-muted text-xs" />
       </div>
     </li>
