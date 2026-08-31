@@ -209,14 +209,30 @@ export default async function DecisionDetailPage({
             {decision.modelPredictions.length === 0 ? (
               <p className="text-fg-muted text-sm italic">No model predictions recorded for this decision.</p>
             ) : (
-              <ul className="flex flex-col gap-2 text-sm">
-                {decision.modelPredictions.map((prediction, i) => (
-                  <li key={i} className="text-fg-secondary">
-                    <span className="text-fg font-medium">{prediction.modelName}</span> ({prediction.modelVersion}):{" "}
-                    <span className="font-mono tabular-nums">{prediction.predictedValue}</span>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="flex flex-col gap-2 text-sm">
+                  {decision.modelPredictions.map((prediction, i) => (
+                    <li key={i} className="text-fg-secondary flex flex-wrap items-baseline gap-x-2">
+                      <span className="text-fg font-medium">{humanizeEnumValue(prediction.modelName)}</span>
+                      {/* predictedValue is a 0-1 probability - render it as one
+                          rather than a bare decimal, matching how every other
+                          probability in the product is displayed. */}
+                      <span className="font-mono tabular-nums">{formatPercentOrUnavailable(prediction.predictedValue)}</span>
+                      <span className="text-fg-muted text-xs">
+                        {prediction.modelVersion} &middot; <Timestamp iso={prediction.predictedAt} className="text-fg-muted inline text-xs" />
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {/* Stated plainly on the screen an operator actually reads,
+                    not just in the docs: these are transparent hand-set
+                    baselines, advisory input to the engine - never a measured
+                    outcome and never a causal claim. */}
+                <p className="text-fg-muted mt-3 text-xs">
+                  Advisory model input only. These are transparent baseline models, not trained on historical outcome data —
+                  the Decision Engine&apos;s safety, policy and economic gates apply after them and can override any prediction.
+                </p>
+              </>
             )}
           </section>
         </div>
