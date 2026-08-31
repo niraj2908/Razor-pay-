@@ -12,8 +12,14 @@ import { TextField } from "@/components/ui/TextField";
  * session on success, or a uniform `invalid_credentials` 401 (this form
  * never distinguishes "wrong email" from "wrong password", matching the
  * backend's own enumeration-resistant design).
+ *
+ * "Explore Demo" (Phase 28C reliability fix) is a plain link to GET /demo,
+ * not a client-fetch button - it must work even if this component's own
+ * JS never finishes loading, and must be reachable as a bookmarkable URL
+ * on its own. `demoErrorMessage` is passed down from the server-rendered
+ * page after GET /demo redirects back here having failed.
  */
-export function LoginForm() {
+export function LoginForm({ demoErrorMessage = null }: { demoErrorMessage?: string | null }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -98,6 +104,18 @@ export function LoginForm() {
           Create a workspace
         </Link>
       </p>
+
+      <div className="border-border mt-1 flex flex-col items-center gap-1.5 border-t pt-4">
+        <p className="text-fg-muted text-xs">Evaluating the product? No account needed.</p>
+        <Link href="/demo" className="text-info text-sm font-medium hover:underline">
+          Explore Demo
+        </Link>
+        {demoErrorMessage ? (
+          <p role="alert" className="text-danger text-xs">
+            {demoErrorMessage}
+          </p>
+        ) : null}
+      </div>
     </form>
   );
 }
