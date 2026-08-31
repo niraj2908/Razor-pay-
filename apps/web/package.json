@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "db:seed:demo": "tsx src/lib/demo/cli.ts seed",
     "db:reset:demo": "tsx src/lib/demo/cli.ts reset",
-    "db:reseed:demo": "tsx src/lib/demo/cli.ts reseed"
+    "db:reseed:demo": "tsx src/lib/demo/cli.ts reseed",
+    "db:provision:razorpay-test": "tsx src/lib/razorpayTestMode/cli.ts"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",
