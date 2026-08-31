@@ -4,14 +4,46 @@ import { useState, type FormEvent } from "react";
 import { SendIcon } from "@/lib/design/icons";
 import { Button } from "@/components/ui/Button";
 
-type Exchange = { question: string; answer: string; citations: string[]; error?: boolean };
+type Evidence = "observed" | "estimated" | "validated_causal" | "none";
+
+type Exchange = {
+  question: string;
+  answer: string;
+  citations: string[];
+  evidence?: Evidence;
+  error?: boolean;
+};
 
 const EXAMPLE_PROMPTS = [
   "Why is revenue at risk?",
-  "Which cases need attention?",
-  "What recovery outcomes did we get?",
+  "What is the recovery opportunity?",
+  "Which decisions are waiting?",
+  "How did interventions perform?",
   "What does the experiment show?",
+  "What can you do?",
 ];
+
+/**
+ * Renders HOW a figure should be read, never hidden behind a toggle. An
+ * operator must be able to tell at a glance whether a number was counted
+ * from real rows, produced by an untrained baseline model, or independently
+ * validated as a causal effect - these are three very different claims and
+ * conflating them is the main way a recovery dashboard misleads someone.
+ */
+const EVIDENCE_LABEL: Record<Exclude<Evidence, "none">, { text: string; className: string }> = {
+  observed: {
+    text: "Observed",
+    className: "border-success/30 bg-success/10 text-success",
+  },
+  estimated: {
+    text: "Estimated · model",
+    className: "border-warning/30 bg-warning/10 text-warning",
+  },
+  validated_causal: {
+    text: "Validated causal effect",
+    className: "border-info/30 bg-info/10 text-info",
+  },
+};
 
 /**
  * The AI Operational Assistant's chat surface (Phase 28C). Talks to
@@ -39,7 +71,10 @@ export function AssistantPanel() {
       });
       if (response.status === 200) {
         const data = await response.json();
-        setExchanges((prev) => [...prev, { question: trimmed, answer: data.answer, citations: data.citations ?? [] }]);
+        setExchanges((prev) => [
+          ...prev,
+          { question: trimmed, answer: data.answer, citations: data.citations ?? [], evidence: data.evidence },
+        ]);
       } else if (response.status === 429) {
         setExchanges((prev) => [...prev, { question: trimmed, answer: "Too many questions in a short time. Please wait a moment and try again.", citations: [], error: true }]);
       } else {
@@ -78,6 +113,15 @@ export function AssistantPanel() {
             <li key={i} className="flex flex-col gap-2">
               <div className="text-fg self-end rounded-lg bg-surface-subtle px-3 py-2 text-sm">{exchange.question}</div>
               <div className={`border-border rounded-lg border p-3 text-sm whitespace-pre-line ${exchange.error ? "text-danger" : "text-fg-secondary"}`}>
+                {exchange.evidence && exchange.evidence !== "none" && !exchange.error ? (
+                  <div className="mb-2">
+                    <span
+                      className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase ${EVIDENCE_LABEL[exchange.evidence].className}`}
+                    >
+                      {EVIDENCE_LABEL[exchange.evidence].text}
+                    </span>
+                  </div>
+                ) : null}
                 {exchange.answer}
                 {exchange.citations.length > 0 ? (
                   <div className="border-border text-fg-muted mt-2 border-t pt-2 text-xs">
