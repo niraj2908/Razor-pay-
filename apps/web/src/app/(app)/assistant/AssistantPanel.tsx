@@ -92,22 +92,20 @@ export function AssistantPanel() {
     ask(question);
   }
 
+  // The suggestions are the only place this assistant's distinct intents are
+  // discoverable - nothing else in the UI enumerates what it can be asked.
+  // They used to render only while `exchanges` was empty, so asking a single
+  // question hid the remaining ones for the rest of the session and left
+  // typing blind as the only way to reach them. They now persist alongside
+  // the conversation, and each answered prompt drops out so the row shrinks
+  // toward empty as the reader works through them rather than re-offering
+  // what they just asked.
+  const askedQuestions = new Set(exchanges.map((exchange) => exchange.question));
+  const remainingPrompts = EXAMPLE_PROMPTS.filter((prompt) => !askedQuestions.has(prompt));
+
   return (
     <div className="flex flex-col gap-4">
-      {exchanges.length === 0 ? (
-        <div className="flex flex-wrap gap-2">
-          {EXAMPLE_PROMPTS.map((prompt) => (
-            <button
-              key={prompt}
-              type="button"
-              onClick={() => ask(prompt)}
-              className="border-border bg-surface text-fg-secondary hover:bg-surface-subtle hover:text-fg rounded-full border px-3 py-1.5 text-sm"
-            >
-              {prompt}
-            </button>
-          ))}
-        </div>
-      ) : (
+      {exchanges.length > 0 ? (
         <ol aria-live="polite" className="flex flex-col gap-4">
           {exchanges.map((exchange, i) => (
             <li key={i} className="flex flex-col gap-2">
@@ -132,7 +130,23 @@ export function AssistantPanel() {
             </li>
           ))}
         </ol>
-      )}
+      ) : null}
+
+      {remainingPrompts.length > 0 ? (
+        <div className="flex flex-wrap gap-2">
+          {remainingPrompts.map((prompt) => (
+            <button
+              key={prompt}
+              type="button"
+              onClick={() => ask(prompt)}
+              disabled={pending}
+              className="border-border bg-surface text-fg-secondary hover:bg-surface-subtle hover:text-fg rounded-full border px-3 py-1.5 text-sm disabled:opacity-50"
+            >
+              {prompt}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <form onSubmit={handleSubmit} className="flex items-end gap-2">
         <div className="flex flex-1 flex-col gap-1.5">
