@@ -78,6 +78,36 @@ function readEntity(envelope: unknown, kind: string): Record<string, unknown> | 
   return container ? asRecord(container.entity) : null;
 }
 
+/**
+ * Razorpay's own failure vocabulary, copied verbatim off the payment
+ * entity. Nothing here interprets what the values MEAN - that mapping onto
+ * our RiskDiagnosis vocabulary lives in failureReasonMapping.ts, so it can
+ * be revised without touching ingestion, and so what Razorpay actually sent
+ * stays recoverable from the Payment row exactly as sent.
+ *
+ * All four fields are absent on success events, which is why every column
+ * is nullable and why `hasAny` gates the write below.
+ */
+type RazorpayFailureSignals = {
+  errorCode: string | null;
+  errorReason: string | null;
+  errorSource: string | null;
+  errorStep: string | null;
+};
+
+function readFailureSignals(paymentEntity: Record<string, unknown> | null): RazorpayFailureSignals {
+  return {
+    errorCode: readString(paymentEntity?.error_code),
+    errorReason: readString(paymentEntity?.error_reason),
+    errorSource: readString(paymentEntity?.error_source),
+    errorStep: readString(paymentEntity?.error_step),
+  };
+}
+
+function hasAnyFailureSignal(signals: RazorpayFailureSignals): boolean {
+  return Object.values(signals).some((value) => value !== null);
+}
+
 function extractRazorpayPaymentId(envelope: unknown): string | null {
   return readString(readEntity(envelope, "payment")?.id);
 }
@@ -185,6 +215,7 @@ async function findOrCreatePayment(
 
   const currency = readString(paymentEntity?.currency) ?? "INR";
   const method = readString(paymentEntity?.method);
+  const failureSignals = readFailureSignals(paymentEntity);
 
   try {
     const created = await prisma.payment.create({
@@ -195,6 +226,7 @@ async function findOrCreatePayment(
         currency,
         method,
         status: initialStatus,
+        ...failureSignals,
       },
     });
     return { outcome: "found_or_created", payment: created, wasNewlyCreated: true };
@@ -231,9 +263,24 @@ async function associateExistingPayment(
   // created - a freshly-created Payment's initial status already came from
   // this exact event, so this is a harmless no-op in that case, and a
   // correct monotonic update in the concurrent-race fallback case.
-  const incomingStatus = mapRazorpayStatus(readEntity(payload, "payment")?.status);
-  if (incomingStatus && !isStatusRegression(payment.status, incomingStatus)) {
-    await prisma.payment.update({ where: { id: payment.id }, data: { status: incomingStatus } });
+  const incomingEntity = readEntity(payload, "payment");
+  const incomingStatus = mapRazorpayStatus(incomingEntity?.status);
+  const incomingSignals = readFailureSignals(incomingEntity);
+
+  // Status and failure signals move independently. A later success event
+  // carries no error fields at all, and must never blank out the failure
+  // that is the whole reason a recovery candidate exists - so the signals
+  // are written only when the incoming event actually carries some.
+  const statusUpdate =
+    incomingStatus && !isStatusRegression(payment.status, incomingStatus)
+      ? { status: incomingStatus }
+      : {};
+  const signalUpdate = hasAnyFailureSignal(incomingSignals) ? incomingSignals : {};
+  if (Object.keys(statusUpdate).length > 0 || Object.keys(signalUpdate).length > 0) {
+    await prisma.payment.update({
+      where: { id: payment.id },
+      data: { ...statusUpdate, ...signalUpdate },
+    });
   }
 
   await prisma.paymentEvent.update({ where: { id: paymentEventId }, data: { paymentId: payment.id } });

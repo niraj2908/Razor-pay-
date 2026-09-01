@@ -35,6 +35,30 @@ function lifecycleEventEnvelope(eventType: string, razorpayPaymentId: string, st
   };
 }
 
+function failedEventEnvelope(razorpayPaymentId: string, amount: number) {
+  // Shaped exactly like Razorpay's payment.failed entity, including the four
+  // error fields the Decision Engine now diagnoses from.
+  return {
+    event: "payment.failed",
+    payload: {
+      payment: {
+        entity: {
+          id: razorpayPaymentId,
+          amount,
+          currency: "INR",
+          status: "failed",
+          method: "card",
+          error_code: "BAD_REQUEST_ERROR",
+          error_description: "Payment processing failed because of incorrect OTP",
+          error_source: "customer",
+          error_step: "payment_authentication",
+          error_reason: "payment_authentication_failed",
+        },
+      },
+    },
+  };
+}
+
 async function makeRecoverySetup() {
   const merchant = await prisma.merchant.create({ data: { name: `Assoc test merchant ${TAG}` } });
   createdMerchantIds.push(merchant.id);
@@ -367,6 +391,76 @@ describe("associatePaymentEvent - new Payment creation against a real database",
       const matchingPayments = await prisma.payment.findMany({ where: { razorpayPaymentId } });
       expect(matchingPayments).toHaveLength(1); // exactly one - no duplicate despite 5 concurrent creators
       expect(matchingPayments[0].merchantId).toBe(merchant.id);
+    },
+    20_000
+  );
+
+  it(
+    "persists Razorpay's failure signals from a payment.failed event onto the Payment",
+    async () => {
+      const merchant = await prisma.merchant.create({ data: { name: `Assoc test merchant ${TAG}` } });
+      createdMerchantIds.push(merchant.id);
+      const razorpayPaymentId = `pay_${randomUUID().slice(0, 12)}`;
+      const payment = await prisma.payment.create({
+        data: { merchantId: merchant.id, razorpayPaymentId, amount: 250000, currency: "INR", status: "CREATED" },
+      });
+      expect(payment.errorReason).toBeNull();
+
+      const failedEvent = await prisma.paymentEvent.create({
+        data: {
+          razorpayEventId: `${TAG}-failed-signals`,
+          eventType: "payment.failed",
+          payload: failedEventEnvelope(razorpayPaymentId, 250000),
+        },
+      });
+      createdPaymentEventIds.push(failedEvent.id);
+
+      await associatePaymentEvent(failedEvent.id);
+
+      const updated = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(updated.status).toBe("FAILED");
+      expect(updated.errorCode).toBe("BAD_REQUEST_ERROR");
+      expect(updated.errorReason).toBe("payment_authentication_failed");
+      expect(updated.errorSource).toBe("customer");
+      expect(updated.errorStep).toBe("payment_authentication");
+    },
+    20_000
+  );
+
+  it(
+    "a later success event carries no error fields and must never blank the recorded failure",
+    async () => {
+      const merchant = await prisma.merchant.create({ data: { name: `Assoc test merchant ${TAG}` } });
+      createdMerchantIds.push(merchant.id);
+      const razorpayPaymentId = `pay_${randomUUID().slice(0, 12)}`;
+      const payment = await prisma.payment.create({
+        data: { merchantId: merchant.id, razorpayPaymentId, amount: 250000, currency: "INR", status: "CREATED" },
+      });
+
+      const failedEvent = await prisma.paymentEvent.create({
+        data: {
+          razorpayEventId: `${TAG}-failed-then-captured-failed`,
+          eventType: "payment.failed",
+          payload: failedEventEnvelope(razorpayPaymentId, 250000),
+        },
+      });
+      createdPaymentEventIds.push(failedEvent.id);
+      await associatePaymentEvent(failedEvent.id);
+
+      const capturedEvent = await prisma.paymentEvent.create({
+        data: {
+          razorpayEventId: `${TAG}-failed-then-captured-captured`,
+          eventType: "payment.captured",
+          payload: lifecycleEventEnvelope("payment.captured", razorpayPaymentId, "captured"),
+        },
+      });
+      createdPaymentEventIds.push(capturedEvent.id);
+      await associatePaymentEvent(capturedEvent.id);
+
+      const updated = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(updated.status).toBe("CAPTURED"); // status still moves forward
+      expect(updated.errorReason).toBe("payment_authentication_failed"); // the failure is still on record
+      expect(updated.errorSource).toBe("customer");
     },
     20_000
   );

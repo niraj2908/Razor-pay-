@@ -165,6 +165,18 @@ model Payment {
   currency          String                @default("INR")
   method            String?
   status            RazorpayPaymentStatus @default(CREATED)
+  // Razorpay's own failure signals, copied verbatim from the payment entity
+  // on a failure event and never interpreted at write time. The Decision
+  // Engine needs a structured reason to diagnose anything better than
+  // "state uncertain", and the honest place for that is the raw vocabulary
+  // Razorpay actually sends (error_code / error_reason / error_source /
+  // error_step) - mapping it onto our RiskDiagnosis vocabulary is a
+  // separate, testable, revisable decision (failureReasonMapping.ts).
+  // Nullable because most events carry no error at all.
+  errorCode         String?
+  errorReason       String?
+  errorSource       String?
+  errorStep         String?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
