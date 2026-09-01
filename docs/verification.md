@@ -8,11 +8,12 @@ database the deployment uses. Nothing in this file is estimated.
 **Commits:** passes verified at `352418b`, `a9f613d`, `aef5059`, and the executable-strategy work in §9
 **Branch:** `main`
 
-This log was written in five passes. The first ran against `352418b`; a second
+This log was written in six passes. The first ran against `352418b`; a second
 followed after the Razorpay Test Mode credentials were replaced and two defects
 were fixed; a third (§8) records the failure-diagnosis work that made ACT
 reachable for real traffic; a fourth (§9) records the executable-strategy fix
-that followed from it; a fifth (§10) records the operator execution trigger. Where an earlier pass's finding was later
+that followed from it; a fifth (§10) records the operator execution trigger; a sixth (§11) records the
+real end-to-end ACT execution that closed the last open gap. Where an earlier pass's finding was later
 superseded, the entry says so rather than being quietly deleted.
 
 ## 1. Static checks
@@ -225,9 +226,10 @@ Stated precisely, so no row can be read as more than it is:
 | Outbound execution (Payment Link creation via `executeCommand`) | Verified — real Test Mode link created, `Execution.status = SUCCEEDED` |
 | Inbound webhook lifecycle on real data | Verified through signature check, persistence, association, risk creation, decision, outcome attribution, audit, UI and reports |
 | STOP branch on real Razorpay data | Verified |
-| Engine able to choose ACT for a real failure | Verified by running the real engine per diagnosis (§8); not yet exercised by live traffic |
-| Operator execution trigger | Implemented and integration-tested against a real database (§10); not yet used on a real ACT decision |
-| ACT on a real payment, end to end | **Not verified** — no real failing payment has produced an ACT decision that an operator then executed (§4, §8, §10) |
+| Engine able to choose ACT for a real failure | Verified by running the real engine per diagnosis (§8), and exercised on real live traffic (§11) |
+| Operator execution trigger | Implemented, integration-tested (§10), and exercised on a real ACT decision (§11) |
+| ACT on a real payment, end to end | **Verified** 2026-09-01 (§11) — real `payment.failed` → ACT → operator approval → real Razorpay Payment Link |
+| Revenue actually recovered by that execution | **Not verified** — the created link is unpaid; outcome `PENDING`, attribution null (§11) |
 | Experiments and causal measurement | Verified on synthetic Demo Workspace data only |
 
 ## 8. Failure diagnosis (2 September 2026)
@@ -257,11 +259,13 @@ The same outcomes hold at ₹250, so they are not amount-boundary artefacts.
 
 ### What this does and does not prove
 
-It proves the engine can choose an executable ACT for a real failure. It does
-not prove ACT end to end: no real payment has arrived since the mapping
-shipped, so every real `RevenueRiskEvent` in the database still carries the
-`STATE_UNCERTAIN` diagnosis it was created with. (The missing production caller
-noted here was added afterwards — see §10.)
+It proves the engine can choose an executable ACT for a real failure. At the
+time of this pass it did not yet prove ACT end to end: no real payment had
+arrived since the mapping shipped, so every real `RevenueRiskEvent` still
+carried the `STATE_UNCERTAIN` diagnosis it was created with. *(Both gaps closed
+later the same day — the missing production caller in §10, and a real
+`payment.failed` diagnosed `NETWORK_DEGRADATION` and executed by an operator in
+§11.)*
 
 ### Two findings recorded rather than fixed
 
@@ -395,10 +399,68 @@ consume account quota for nothing:
 | Real webhook lifecycle (delivery → signature → persistence → association → risk → decision → outcome → audit) | **Verified** |
 | Real service-layer Payment Link execution | **Verified** |
 | Operator execution trigger | **Implemented and integration-tested** |
-| Real failing Test Mode payment → ACT → operator click → real Payment Link | **NOT YET VERIFIED** |
+| Real failing Test Mode payment → ACT → operator click → real Payment Link | **VERIFIED** 2026-09-01 — see §11 |
 
-The remaining gap is evidence, not capability. It requires a genuine failing
+*(That gap was closed the same day - see §11.)* It required a genuine failing
 Test Mode checkout whose failure signals map to an ACT decision, executed by a
-person - which means someone putting a card through Razorpay's checkout. No
-part of that can be produced from this repository, and nothing here claims it
-has been.
+person, which is exactly what happened.
+
+## 11. Real end-to-end ACT execution (2026-09-01)
+
+The last open gap is closed. A genuine Razorpay Test Mode failure produced an
+ACT decision that an authenticated operator executed, creating a real Razorpay
+Payment Link. Every value below was read from the database or from Razorpay's
+API after the fact; none is asserted.
+
+### The chain
+
+| Stage | Evidence |
+|---|---|
+| Razorpay payment | `pay_TWuddosezaG8S2` — ₹100, card, **FAILED** |
+| Failure signals | `error_code BAD_REQUEST_ERROR`, `error_reason payment_failed`, `error_source gateway`, `error_step payment_authorization` |
+| Webhook | `payment.failed`, event id `TWudu4AHIXqCGQ`, ingested **20:57:51.973Z** |
+| RevenueRiskEvent | `f894e110-2d96-4ff1-94a2-516e06946c54`, `dataSource REAL_RAZORPAY_TEST_MODE` |
+| Diagnosis | `NETWORK_DEGRADATION`, mapped from `error_source: gateway` |
+| Model | natural recovery **0.55**, confidence **0.75** (policy minimum 0.5) |
+| Decision | **ACT** `cmtj5fqhj000fbt15jwg9q6hz`, decided **20:58:07.447Z**, `policy-v1` / `baseline-v1` |
+| Chosen action | **PAYMENT_LINK**, expected incremental value **₹8** |
+| Strategy not taken | RETRY priced higher (**₹35**) but is not performable — recorded as `unexecutableBestStrategy`, never selected |
+| Operator approval | Execute clicked by an authenticated operator on the Test Mode merchant, **21:15:11.796Z** |
+| Razorpay Payment Link | **`plink_TWuwKdqiR5pn5g`**, created ~**21:15:16Z**, `reference_id` = the decision id |
+| Execution | `cmtj61ovo0005z9tu731cetsc`, **SUCCEEDED**, completed **21:15:17.156Z** |
+| Audit trail | `execution.requested` 21:15:12.850Z · `execution.started` 21:15:14.943Z · `execution.succeeded` 21:15:18.203Z |
+
+Ingestion to decision took 16 seconds. Decision to executed Payment Link took
+about 5 seconds once the operator approved.
+
+### Integrity checks after execution
+
+- Exactly **1** execution row for the decision, and exactly **1** distinct
+  Razorpay reference - no duplicate execution, no duplicate link.
+- The decision is **immutable**: still ACT, same `decidedAt`, same chosen
+  action, same expected incremental value, and exactly one `decision.act` audit
+  event. Executing wrote nothing back onto it.
+- Outcome remains **`PENDING`**, `attributionStatus` null, `recoveredAmount`
+  null, `RevenueRiskEvent.resolvedAt` null.
+- Isolation intact: this is `REAL_RAZORPAY_TEST_MODE` data on
+  `razorpay_test_mode_merchant`; the Demo Workspace holds no real rows and the
+  Test Mode merchant holds no synthetic ones.
+
+### What this does and does not prove
+
+**Verified:** real failed-payment ingestion, and real operator-approved recovery
+execution against Razorpay.
+
+**Not verified:** that this execution recovered revenue. The Payment Link is
+unpaid (`amount_paid` 0). Executing a recovery is not the same as recovering
+revenue, and the system deliberately claims nothing until a qualifying outcome
+arrives - at which point attribution must still decide whether the payment was
+incremental or would have happened anyway.
+
+The three real lifecycles now on record are one STOP (safety gate on an
+already-succeeded payment), one STOP on a successful wallet payment, and this
+ACT. Every model number behind them is a hand-set baseline, advisory only - not
+a trained model - and the Demo Workspace remains separately labelled synthetic.
+
+This prototype holds no RBI authorisation, no PCI-DSS certification, and no DPDP
+compliance attestation.
