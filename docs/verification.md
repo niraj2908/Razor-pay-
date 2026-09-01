@@ -4,13 +4,14 @@ What was actually run to finalize this project, when, and what it produced.
 Every number here came from a command in this repository or a query against the
 database the deployment uses. Nothing in this file is estimated.
 
-**Date:** 1 September 2026
-**Commit:** `a9f613d`
+**Date:** 1-2 September 2026
+**Commit:** `aef5059`
 **Branch:** `main`
 
-This log was written in two passes on the same day. The first pass ran against
-`352418b`; a second pass followed after the Razorpay Test Mode credentials were
-replaced and two defects were fixed. Where the first pass's finding was later
+This log was written in three passes. The first ran against `352418b`; a second
+followed after the Razorpay Test Mode credentials were replaced and two defects
+were fixed; a third (§8) records the failure-diagnosis work that made ACT
+reachable for real traffic. Where an earlier pass's finding was later
 superseded, the entry says so rather than being quietly deleted.
 
 ## 1. Static checks
@@ -21,7 +22,7 @@ superseded, the entry says so rather than being quietly deleted.
 | `pnpm typecheck` | clean (forced, uncached) |
 | `pnpm build` | clean — Next.js 16.3.3, Turbopack, all routes compiled |
 | `prisma validate` | schema valid |
-| `prisma migrate status` | 11 migrations, database schema up to date |
+| `prisma migrate status` | 12 migrations, database schema up to date |
 
 `turbo run build typecheck` in **parallel** fails with `TS2307: Cannot find
 module './routes.js'` — the two tasks race on `.next/types`. Run them
@@ -35,12 +36,12 @@ moved out of the working tree rather than committed or ignored.
 
 ## 2. Unit tests
 
-`pnpm test` (in `apps/web`) — **61 files, 640 tests, all passing**, ~4s, no
+`pnpm test` (in `apps/web`) — **63 files, 668 tests, all passing**, ~5s, no
 database access.
 
 ## 3. Integration tests
 
-`pnpm test:integration` (in `apps/web`) — **20 files, 143 tests**, ~7-8 minutes
+`pnpm test:integration` (in `apps/web`) — **20 files, 145 tests**, ~7-8 minutes
 against the live Postgres pooler.
 
 **Final state: all 143 pass.** Getting there surfaced two genuine problems and
@@ -128,7 +129,8 @@ succeeded — the STOP branch behaving exactly as designed, on real data.
 No execution row exists for real data, and ACT on a real payment is **not
 verified**. Two separate things block it, both inside this repository:
 
-1. **The engine cannot currently emit ACT for real traffic.**
+1. **The engine cannot currently emit ACT for real traffic.** *(Superseded on
+   2 September - see §8, which fixed exactly this.)*
    `candidateBuilder.ts` hardcodes `failureReason: "STATE_UNCERTAIN"` because
    `Payment` stores no structured failure reason yet. In
    `naturalRecoveryModel.ts` that reason carries a confidence of `0.35`, below
@@ -197,7 +199,7 @@ destructive action that has not been taken.
 `vercel ls` and `vercel inspect` against project
 `niraj-kumar-singh-s-projects/revenue-recovery-intelligence`:
 
-- Current production deployment: `revenue-recovery-intelligence-b6yqlknhe.vercel.app`, status Ready, built from commit `a9f613d` on `main` (confirmed via the deployment's `meta.githubCommitSha`; `vercel inspect --json` returns a trimmed object whose `meta` is empty, so the REST API is the reliable source).
+- Current production deployment: `revenue-recovery-intelligence-7d436bpcs.vercel.app`, status Ready, built from commit `aef5059` on `main` (confirmed via the deployment's `meta.githubCommitSha`; `vercel inspect --json` returns a trimmed object whose `meta` is empty, so the REST API is the reliable source).
 - Stable production alias: **https://revenue-recovery-intelligence.vercel.app** (HTTP 200, redirects to `/login`).
 - The URL used in earlier documentation, `revenue-recovery-intelligence-qz2w9sykk.vercel.app`, is a **preview** deployment. It still responds, but it is not production and should not be cited as such.
 
@@ -220,5 +222,54 @@ Stated precisely, so no row can be read as more than it is:
 | Outbound execution (Payment Link creation via `executeCommand`) | Verified — real Test Mode link created, `Execution.status = SUCCEEDED` |
 | Inbound webhook lifecycle on real data | Verified through signature check, persistence, association, risk creation, decision, outcome attribution, audit, UI and reports |
 | STOP branch on real Razorpay data | Verified |
-| ACT on a real payment, end to end | **Not verified** — the engine cannot emit ACT for real traffic today, and no production caller executes decisions (§4) |
+| Engine able to choose ACT for a real failure | Verified by running the real engine per diagnosis (§8); not yet exercised by live traffic |
+| ACT on a real payment, end to end | **Not verified** — no real payment has produced an ACT decision, and no production caller executes decisions (§4, §8) |
 | Experiments and causal measurement | Verified on synthetic Demo Workspace data only |
+
+## 8. Failure diagnosis (2 September 2026)
+
+The §4 finding that "the engine cannot currently emit ACT for real traffic" was
+addressed. `Payment` now stores Razorpay's own failure signals (`error_code`,
+`error_reason`, `error_source`, `error_step`, migration
+`20260901175926_payment_failure_signals`), and `failureReasonMapping.ts` maps
+them onto the `RiskDiagnosis` vocabulary that `candidateBuilder.ts` feeds to the
+engine.
+
+### What the engine now does, per diagnosis
+
+Measured by running `evaluateRecoveryDecision` itself at ₹2,500 - the real Test
+Mode payment's amount - not by reading the tables:
+
+| Razorpay signals | Diagnosis | natural / confidence | Decision | Strategy | Executable |
+|---|---|---|---|---|---|
+| `source=customer` | `CUSTOMER_ABANDONMENT` | 0.25 / 0.70 | ACT | PAYMENT_LINK | yes |
+| `source=bank` | `OTHER_RECOVERABLE` | 0.40 / 0.55 | ACT | PAYMENT_LINK | yes |
+| `source=business` | `CONFIRMED_FAILURE` | 0.05 / 0.90 | ACT | PAYMENT_LINK | yes |
+| `source=gateway` | `NETWORK_DEGRADATION` | 0.55 / 0.75 | ACT | RETRY | **no** |
+| unrecognised code | `STATE_UNCERTAIN` | 0.35 / 0.35 | ESCALATE | none | n/a |
+| no signals | `STATE_UNCERTAIN` | 0.35 / 0.35 | ESCALATE | none | n/a |
+
+The same outcomes hold at ₹250, so they are not amount-boundary artefacts.
+
+### What this does and does not prove
+
+It proves the engine can choose an executable ACT for a real failure. It does
+not prove ACT end to end: no real payment has arrived since the mapping
+shipped, so every real `RevenueRiskEvent` in the database still carries the
+`STATE_UNCERTAIN` diagnosis it was created with, and no production route or UI
+control calls `executeCommand`.
+
+### Two findings recorded rather than fixed
+
+- **`NETWORK_DEGRADATION` selects RETRY, which the executor rejects.** Razorpay
+  has no retry-a-failed-payment API, so `SUPPORTED_EXECUTION_STRATEGIES`
+  excludes it. The mismatch predates this work; the mapping makes it reachable
+  on real traffic for the first time. `decisionExecutability.test.ts` pins the
+  real behaviour, including `executeCommand` returning
+  `{status: "rejected", reason: "unsupported_strategy"}`. Nothing executes
+  decisions automatically, so no false claim of recovery can result - but this
+  must be resolved before execution is wired to any trigger.
+- **`CONFIRMED_FAILURE` still reaches ACT** on a large enough amount, because
+  the hand-set model gives PAYMENT_LINK a 0.03 uplift even there. That is a
+  model-calibration question, not a mapping defect, and was left alone rather
+  than tuned to produce a tidier table.

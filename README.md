@@ -20,9 +20,9 @@ act when the answer is no, and prove the difference afterwards.
 | | |
 |---|---|
 | Production URL | https://revenue-recovery-intelligence.vercel.app |
-| Deployment | `revenue-recovery-intelligence-b6yqlknhe.vercel.app` (Ready, Production) |
-| Commit deployed | `a9f613d` |
-| Verified | 1 September 2026 |
+| Deployment | `revenue-recovery-intelligence-7d436bpcs.vercel.app` (Ready, Production) |
+| Commit deployed | `aef5059` |
+| Verified | 2 September 2026 |
 
 The Demo Workspace operator account (`demo-operator@revenue-recovery.demo`) is
 seeded from `DEMO_OPERATOR_PASSWORD`; the password is an environment secret and
@@ -34,9 +34,14 @@ is deliberately not printed in this repository.
    HMAC-SHA256 signature in constant time, deduplicates on
    `x-razorpay-event-id`, persists a `PaymentEvent`, and returns before doing
    any downstream work.
-2. **Turns failures into risk.** Association resolves the merchant and payment,
-   then a `RevenueRiskEvent` is created with a diagnosis and the amount at risk,
-   tagged `SIMULATED` or `REAL_RAZORPAY_TEST_MODE` — never both.
+2. **Turns failures into risk.** Association resolves the merchant and payment
+   and records Razorpay's own failure signals (`error_code`, `error_reason`,
+   `error_source`, `error_step`) verbatim on the `Payment`. A `RevenueRiskEvent`
+   is then created with a diagnosis mapped from those signals
+   ([`failureReasonMapping.ts`](apps/web/src/lib/recovery/failureReasonMapping.ts))
+   and the amount at risk, tagged `SIMULATED` or `REAL_RAZORPAY_TEST_MODE` —
+   never both. Anything unrecognised stays `STATE_UNCERTAIN`: an unmapped code
+   degrades to "we don't know", never to a confident diagnosis nobody made.
 3. **Decides economically.** For each candidate action:
 
    ```
@@ -74,13 +79,13 @@ is deliberately not printed in this repository.
 
 | Check | Result |
 |---|---|
-| Unit tests (`pnpm test`, 61 files) | **640 passed** |
-| Integration tests (`pnpm test:integration`, 20 files) | **143 passed** |
+| Unit tests (`pnpm test`, 63 files) | **668 passed** |
+| Integration tests (`pnpm test:integration`, 20 files) | **145 passed** |
 | `pnpm lint` | clean |
 | `pnpm typecheck` | clean |
 | `pnpm build` | clean (Next.js 16, Turbopack) |
-| `prisma validate` / `migrate status` | schema valid, 11 migrations, database up to date |
-| Production deployment | Ready, serving `a9f613d` |
+| `prisma validate` / `migrate status` | schema valid, 12 migrations, database up to date |
+| Production deployment | Ready, serving `aef5059` |
 
 The integration suite includes `executionService.integration.test.ts`, which
 creates a real Payment Link in Razorpay Test Mode through the Execution
@@ -95,6 +100,7 @@ reading that as a code defect.
 | Payment webhook ingestion | **Real, verified** | Idempotent on `x-razorpay-event-id`; real Test Mode deliveries persisted |
 | Webhook signature verification | **Real, verified** | Timing-safe HMAC-SHA256 ([`signature.ts`](apps/web/src/lib/razorpay/signature.ts)) |
 | Merchant association & risk creation | **Real, verified** | Real event produced a `RevenueRiskEvent` tagged `REAL_RAZORPAY_TEST_MODE` |
+| Failure-signal capture & diagnosis | **Real, not yet exercised on live traffic** | Razorpay's `error_*` fields are persisted and mapped to a diagnosis ([`failureReasonMapping.ts`](apps/web/src/lib/recovery/failureReasonMapping.ts)); unit- and integration-tested, but no real payment has arrived since it shipped |
 | Decision engine (ACT/WAIT/STOP/ESCALATE) | **Real, verified** | Ran on the real event and produced a STOP ([`decisionEngine.ts`](apps/web/src/lib/recovery/decisionEngine.ts)) |
 | Safety and policy gates | **Real, verified** | [`safetyGate.ts`](apps/web/src/lib/recovery/safetyGate.ts), [`policy.ts`](apps/web/src/lib/recovery/policy.ts) |
 | Outcome attribution & audit trail | **Real, verified** | Real decision carries an outcome attributed `NATURAL_RECOVERY`, plus audit events |
@@ -102,7 +108,7 @@ reading that as a code defect.
 | Experiments & causal measurement | **Real, on synthetic data** | Randomized assignment and `VALID_EFFECT` measurement run over the Demo Workspace |
 | Razorpay Test Mode API authentication | **Real, verified** | Live credentials authenticate through the application's own adapter ([`client.ts`](apps/web/src/lib/razorpay/client.ts)) |
 | Payment Link creation (outbound execution) | **Real, verified at the service layer** | `executeCommand` created a real Test Mode Payment Link and recorded `Execution.status = SUCCEEDED` with its `plink_…` reference, driven by a controlled integration test |
-| ACT on a real payment, end to end | **Not verified — see below** | No real payment has produced an ACT decision, and no production route or UI control calls `executeCommand` |
+| ACT on a real payment, end to end | **Not verified — see below** | The engine can now choose ACT for a real failure, but no real payment has produced one yet, and no production route or UI control calls `executeCommand` |
 | Autonomous execution loop | **Not built** | Execution is deliberately operator-free for now; see [`docs/decision-engine.md`](docs/decision-engine.md) §10 |
 | Recovery probability models | **Cold-start baselines** | Hand-set lookup tables with retry decay ([`naturalRecoveryModel.ts`](apps/web/src/lib/recovery/naturalRecoveryModel.ts)); every estimate carries `modelVersion`/`confidence` |
 | Tokenized card auto-retry | **Not built** | Requires saved-token/subscription access on a live merchant account |
@@ -133,22 +139,35 @@ decision was economically positive (+₹500 expected incremental value) and the
 safety gate overrode it, because the payment had already succeeded — which is
 the behaviour the product exists to demonstrate.
 
-**The ACT branch is not verified on a real payment**, and the reason is in this
-repository, not at Razorpay. Two independent gaps:
+That decision was made before the engine could diagnose a real failure. It read
+`STATE_UNCERTAIN` because `Payment` stored no failure reason at the time; the
+signals are captured now, so a payment arriving today is diagnosed from what
+Razorpay actually said.
 
-1. `candidateBuilder.ts` hardcodes `failureReason: "STATE_UNCERTAIN"`, because
-   `Payment` stores no structured failure reason yet. That reason carries a
-   model confidence of `0.35`, below the policy's `minConfidence` of `0.5`, so
-   a real payment that clears the safety gate resolves to ESCALATE. The engine
-   cannot currently emit ACT for real webhook traffic at any amount. The
-   mapping comment marks `contextFromPayment` as the single place that changes
-   once the webhook captures a real failure reason.
-2. Nothing in the running application calls `executeCommand`. The processing
-   boundary runs association → candidate build → outcome attribution and stops;
-   execution is exercised only by the integration suite.
+**The ACT branch is still not verified on a real payment.** What changed and
+what did not:
 
-So outbound execution against Razorpay is proven, and the decision path on real
-data is proven, but the two have never met on a real payment. The Security &
+- **Fixed.** The engine can now emit ACT for real webhook traffic. With the
+  failure signals stored and mapped, a customer-abandonment or bank-decline
+  failure produces ACT with PAYMENT_LINK — a strategy the Execution Service
+  supports. Verified by running the real engine per diagnosis, not asserted
+  ([`decisionExecutability.test.ts`](apps/web/src/lib/recovery/decisionExecutability.test.ts)).
+- **Still open.** Nothing in the running application calls `executeCommand`.
+  The processing boundary runs association → candidate build → outcome
+  attribution and stops; execution is exercised only by the integration suite.
+- **Still open.** No real payment has arrived since the mapping shipped, so no
+  real `RevenueRiskEvent` has yet been diagnosed as anything but
+  `STATE_UNCERTAIN`. The capability is tested; the evidence is not yet in the
+  database.
+- **Known gap.** A network-degradation failure prices RETRY above PAYMENT_LINK,
+  and Razorpay has no retry-a-failed-payment API, so `executeCommand` rejects
+  that command. The mismatch is pinned by a test rather than papered over. It
+  is harmless while nothing executes automatically, and must be resolved before
+  anything does.
+
+So outbound execution against Razorpay is proven, the decision path on real data
+is proven, and the engine can now choose to act — but the pieces have never met
+on a real payment. The Security &
 Policies page derives this status from the database at request time
 ([`lifecycleVerification.ts`](apps/web/src/lib/razorpay/lifecycleVerification.ts))
 rather than asserting it in prose, so it cannot go stale.
@@ -200,7 +219,7 @@ apps/web/src/lib/recovery/    Decision engine, economics, policy, safety gate,
 apps/web/src/lib/experiments/ Assignment engine and causal measurement
 apps/web/src/lib/razorpay/    Signature, REST client, connection + lifecycle status
 apps/web/src/lib/demo/        Deterministic Demo Workspace seed and reset
-prisma/schema.prisma          21-model PostgreSQL domain model, 11 migrations
+prisma/schema.prisma          21-model PostgreSQL domain model, 12 migrations
 ```
 
 `apps/api`, `services/*`, `packages/*`, and the root `ml/`, `simulator/`, and
@@ -226,9 +245,9 @@ use are the ones in `.env`.
 ## Reproducing the verification
 
 ```bash
-pnpm test                                # 640 unit tests, no database
+pnpm test                                # 668 unit tests, no database
 pnpm typecheck && pnpm build             # clean
-pnpm --filter web test:integration       # 143 tests against DATABASE_URL (~8 min)
+pnpm --filter web test:integration       # 145 tests against DATABASE_URL (~8 min)
 pnpm --filter web db:seed:demo           # run LAST — the suite resets its own demo rows
 ```
 
@@ -250,10 +269,15 @@ See [SECURITY.md](SECURITY.md) and [ENGINEERING_PRINCIPLES.md](ENGINEERING_PRINC
 ## Known limitations
 
 - Recovery probabilities are hand-set baselines, not trained models.
-- ACT is unreachable on real traffic: the failure reason is hardcoded to
-  `STATE_UNCERTAIN`, whose confidence sits below the policy threshold, and no
-  production trigger calls the execution service. Outbound Razorpay calls
-  themselves are verified.
+- ACT can now be chosen for real traffic, but nothing triggers it: no
+  production route or UI control calls the execution service. Outbound Razorpay
+  calls themselves are verified.
+- A network-degradation diagnosis selects RETRY, which Razorpay offers no API
+  for and the Execution Service rejects. Pinned by a test; must be resolved
+  before execution is wired to any trigger.
+- Recovery probabilities remain hand-set, so which diagnosis leads to ACT is a
+  calibration choice, not a learned one. Notably a `CONFIRMED_FAILURE` still
+  clears the action threshold on a large enough amount.
 - Causal measurement has so far been exercised on synthetic Demo Workspace data;
   the real Test Mode merchant has one lifecycle, which is far too little to
   measure anything.
