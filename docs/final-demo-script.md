@@ -49,11 +49,20 @@ Say the label first, once, clearly:
 > "This is the Demo Workspace — synthetic data, deliberately labelled as such,
 > so you can see a populated console. The real Razorpay evidence comes later."
 
-Point at: revenue at risk, recovery opportunity, decision mix, recent activity.
+The page carries its own banner — *"Demo / Test Mode — synthetic evaluation
+data, no real customer payments"* — so point at that as you say it.
 
-> "Seventy-eight payments, fifty-nine recovery candidates, fifty-nine decisions.
-> The mix matters more than the volume: fifty-four Act, one Wait, two Stop, two
-> Escalate. The system is willing to *not* act."
+Point at, in order: revenue at risk **₹1,17,598.25** across 59 open candidates,
+recovery opportunity **₹44,106.99**, then the decision mix.
+
+> "Fifty-nine open candidates, ₹1.17 lakh at risk, and ₹44,000 of expected
+> incremental value on the table. The mix matters more than the volume:
+> fifty-four Act, one Wait, two Stop, two Escalate. The system is willing to
+> *not* act."
+
+If you have a beat spare, point at **Observed recovery rate 47.2%** beside
+**Incremental recovery (causal) ₹20,037.99**: "Those are two different numbers,
+and the difference is the whole product."
 
 ---
 
@@ -64,7 +73,14 @@ Point at: revenue at risk, recovery opportunity, decision mix, recent activity.
 > "Every candidate carries its diagnosis, the amount at risk, and what the
 > engine decided. This is an operator's work queue, not a dashboard to admire."
 
-Point at one row's decision badge, then click into it.
+The top two rows are **Escalate** — ₹15,000 State Uncertain and ₹12,000 Network
+Degradation. Point at them first:
+
+> "The two largest amounts here are escalations, not actions. Low confidence on
+> a big payment goes to a human."
+
+Then click into an **Act / Payment Link** row (₹5,000 Network Degradation is a
+good one — it mirrors the real evidence you're about to show).
 
 ---
 
@@ -92,7 +108,13 @@ synthetic.
 
 ## 2:20–3:05 · The real Razorpay evidence *(the credibility moment)*
 
-*Open Security & Policies, the Razorpay lifecycle section.*
+*Open Security & Policies, the "Razorpay Test Mode integration" section.*
+
+The row you want reads **"Live end-to-end lifecycle · Verified"**, and names the
+branches real payments have produced: **ACT, STOP**. Note the page says a
+recovery execution "was attempted against the live Razorpay API" — deliberately
+conservative wording written before the execution succeeded; narrate the outcome
+from the evidence below rather than reading that line aloud.
 
 > "Now the real part. This status is read from the database at request time — it
 > can't go stale, because it isn't prose."
@@ -142,10 +164,11 @@ Still on the same evidence.
 *Open `/experiments` → the demo experiment.*
 
 > "Back in the synthetic workspace, this is how we'd prove value. Randomised
-> treatment and control. Treatment recovered 81.8%, control 17.9% — a 64-point
-> difference, 95% confidence interval 37 to 79 points, above our pre-set
-> 15-point threshold. That's why it reads **valid effect**. Without the control
-> arm, we'd have called natural recovery a win."
+> treatment and control: 22 treatment units recovered 81.8%, 28 control units
+> recovered 17.9%, with a 95% confidence interval from 37 to 79 points — above
+> our pre-set 15-point threshold. That's why it reads **valid effect**, and why
+> the causal incremental figure is ₹20,037.99 rather than the ₹25,632.35 the
+> treatment arm actually recovered. The gap is what would have happened anyway."
 
 **Say plainly:** "This experiment is synthetic demo data, not real traffic."
 
