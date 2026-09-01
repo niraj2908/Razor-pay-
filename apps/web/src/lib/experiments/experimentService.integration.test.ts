@@ -62,7 +62,16 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await prisma.auditEvent.deleteMany({ where: { entityType: "ExperimentAssignment" } }).catch(() => {});
+  // Scoped to THIS file's own assignments, resolved before they are
+  // deleted. A blanket delete on `entityType: "ExperimentAssignment"`
+  // would take out every assignment audit row in the shared database -
+  // including the demo workspace's and any other suite's, mid-run.
+  const assignmentIds = await prisma.experimentAssignment
+    .findMany({ where: { experimentId: { in: createdExperimentIds } }, select: { id: true } })
+    .then((rows) => rows.map((row) => row.id));
+  await prisma.auditEvent.deleteMany({
+    where: { entityType: "ExperimentAssignment", entityId: { in: assignmentIds } },
+  });
   await prisma.revenueRiskEvent.deleteMany({ where: { merchantId: { in: createdMerchantIds } } });
   await prisma.decision.deleteMany({ where: { revenueRiskEvent: { merchantId: { in: createdMerchantIds } } } });
   await prisma.payment.deleteMany({ where: { merchantId: { in: createdMerchantIds } } });

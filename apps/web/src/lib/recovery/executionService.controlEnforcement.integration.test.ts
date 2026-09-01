@@ -94,7 +94,14 @@ afterEach(() => {
 });
 
 afterAll(async () => {
-  await prisma.auditEvent.deleteMany({ where: { entityType: "Execution" } }).catch(() => {});
+  // Scoped to THIS file's own executions, resolved before they are deleted.
+  // A blanket delete on `entityType: "Execution"` would take out every
+  // Execution audit row in the shared database - including the demo
+  // workspace's and any other suite's, mid-run.
+  const executionIds = await prisma.execution
+    .findMany({ where: { payment: { merchantId: { in: createdMerchantIds } } }, select: { id: true } })
+    .then((rows) => rows.map((row) => row.id));
+  await prisma.auditEvent.deleteMany({ where: { entityType: "Execution", entityId: { in: executionIds } } });
   await prisma.execution.deleteMany({ where: { payment: { merchantId: { in: createdMerchantIds } } } });
   await prisma.decision.deleteMany({ where: { revenueRiskEvent: { merchantId: { in: createdMerchantIds } } } });
   await prisma.revenueRiskEvent.deleteMany({ where: { merchantId: { in: createdMerchantIds } } });
