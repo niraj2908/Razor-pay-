@@ -20,8 +20,8 @@ act when the answer is no, and prove the difference afterwards.
 | | |
 |---|---|
 | Production URL | https://revenue-recovery-intelligence.vercel.app |
-| Deployment | `revenue-recovery-intelligence-lmkpxlzig.vercel.app` (Ready, Production) |
-| Commit deployed | `352418b` |
+| Deployment | `revenue-recovery-intelligence-b6yqlknhe.vercel.app` (Ready, Production) |
+| Commit deployed | `a9f613d` |
 | Verified | 1 September 2026 |
 
 The Demo Workspace operator account (`demo-operator@revenue-recovery.demo`) is
@@ -75,19 +75,18 @@ is deliberately not printed in this repository.
 | Check | Result |
 |---|---|
 | Unit tests (`pnpm test`, 61 files) | **640 passed** |
-| Integration tests (`pnpm test:integration`, 20 files) | **142 passed, 1 failed** — see below |
+| Integration tests (`pnpm test:integration`, 20 files) | **143 passed** |
+| `pnpm lint` | clean |
 | `pnpm typecheck` | clean |
 | `pnpm build` | clean (Next.js 16, Turbopack) |
-| Production deployment | Ready, serving `352418b` |
+| `prisma validate` / `migrate status` | schema valid, 11 migrations, database up to date |
+| Production deployment | Ready, serving `a9f613d` |
 
-The one failing integration test is
-`src/lib/recovery/executionService.integration.test.ts`, which creates a real
-Razorpay Test Mode Payment Link through the Execution Service. It fails today
-because the Razorpay Test Mode API key currently configured for this
-deployment is rejected by Razorpay with `401 BAD_REQUEST_ERROR:
-Authentication failed`. This is a credential problem, not a code path problem —
-but until a working key is configured, outbound execution against Razorpay is
-**not** currently verifiable, and this README does not claim it is.
+The integration suite includes `executionService.integration.test.ts`, which
+creates a real Payment Link in Razorpay Test Mode through the Execution
+Service. It passes. The suite talks to a remote Postgres pooler, so an
+individual test can fail on a dropped connection; rerun the file rather than
+reading that as a code defect.
 
 ## What is real vs simulated
 
@@ -101,7 +100,9 @@ but until a working key is configured, outbound execution against Razorpay is
 | Outcome attribution & audit trail | **Real, verified** | Real decision carries an outcome attributed `NATURAL_RECOVERY`, plus audit events |
 | Reports (CSV / PDF) | **Real** | [`csvReport.ts`](apps/web/src/lib/reports/csvReport.ts), [`pdfReport.ts`](apps/web/src/lib/reports/pdfReport.ts) |
 | Experiments & causal measurement | **Real, on synthetic data** | Randomized assignment and `VALID_EFFECT` measurement run over the Demo Workspace |
-| Payment Link creation (ACT execution) | **Implemented, not currently verified** | Code and a controlled integration test exist; the configured Test Mode key returns 401, and no production route or UI control calls `executeCommand` yet |
+| Razorpay Test Mode API authentication | **Real, verified** | Live credentials authenticate through the application's own adapter ([`client.ts`](apps/web/src/lib/razorpay/client.ts)) |
+| Payment Link creation (outbound execution) | **Real, verified at the service layer** | `executeCommand` created a real Test Mode Payment Link and recorded `Execution.status = SUCCEEDED` with its `plink_…` reference, driven by a controlled integration test |
+| ACT on a real payment, end to end | **Not verified — see below** | No real payment has produced an ACT decision, and no production route or UI control calls `executeCommand` |
 | Autonomous execution loop | **Not built** | Execution is deliberately operator-free for now; see [`docs/decision-engine.md`](docs/decision-engine.md) §10 |
 | Recovery probability models | **Cold-start baselines** | Hand-set lookup tables with retry decay ([`naturalRecoveryModel.ts`](apps/web/src/lib/recovery/naturalRecoveryModel.ts)); every estimate carries `modelVersion`/`confidence` |
 | Tokenized card auto-retry | **Not built** | Requires saved-token/subscription access on a live merchant account |
@@ -127,11 +128,28 @@ Razorpay Test Mode payment
   → UI and CSV/PDF reports
 ```
 
-**The chain is verified up to and including outcome attribution. ACT execution
-against real Razorpay is not verified**: the engine's real-data decision was
-STOP, the account's API key currently fails authentication, and no production
-caller invokes the execution service. The Security & Policies page derives this
-status from the database at request time
+**The STOP branch is verified with real Razorpay data, end to end.** The
+decision was economically positive (+₹500 expected incremental value) and the
+safety gate overrode it, because the payment had already succeeded — which is
+the behaviour the product exists to demonstrate.
+
+**The ACT branch is not verified on a real payment**, and the reason is in this
+repository, not at Razorpay. Two independent gaps:
+
+1. `candidateBuilder.ts` hardcodes `failureReason: "STATE_UNCERTAIN"`, because
+   `Payment` stores no structured failure reason yet. That reason carries a
+   model confidence of `0.35`, below the policy's `minConfidence` of `0.5`, so
+   a real payment that clears the safety gate resolves to ESCALATE. The engine
+   cannot currently emit ACT for real webhook traffic at any amount. The
+   mapping comment marks `contextFromPayment` as the single place that changes
+   once the webhook captures a real failure reason.
+2. Nothing in the running application calls `executeCommand`. The processing
+   boundary runs association → candidate build → outcome attribution and stops;
+   execution is exercised only by the integration suite.
+
+So outbound execution against Razorpay is proven, and the decision path on real
+data is proven, but the two have never met on a real payment. The Security &
+Policies page derives this status from the database at request time
 ([`lifecycleVerification.ts`](apps/web/src/lib/razorpay/lifecycleVerification.ts))
 rather than asserting it in prose, so it cannot go stale.
 
@@ -232,8 +250,10 @@ See [SECURITY.md](SECURITY.md) and [ENGINEERING_PRINCIPLES.md](ENGINEERING_PRINC
 ## Known limitations
 
 - Recovery probabilities are hand-set baselines, not trained models.
-- ACT executions are not wired to a production trigger, and outbound Razorpay
-  calls are currently blocked by an invalid Test Mode API key.
+- ACT is unreachable on real traffic: the failure reason is hardcoded to
+  `STATE_UNCERTAIN`, whose confidence sits below the policy threshold, and no
+  production trigger calls the execution service. Outbound Razorpay calls
+  themselves are verified.
 - Causal measurement has so far been exercised on synthetic Demo Workspace data;
   the real Test Mode merchant has one lifecycle, which is far too little to
   measure anything.

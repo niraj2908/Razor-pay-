@@ -4,16 +4,17 @@ Every row points at code, tests, or database evidence in this repository. Where
 something is implemented but not yet demonstrated end-to-end on real Razorpay
 data, the row says so — an honest gap is more useful than an unbacked claim.
 
-Verified 1 September 2026 against commit `352418b`: 640 unit tests passing,
-142 of 143 integration tests passing (the exception is documented under
-"Razorpay integration"), clean `typecheck` and `build`, production deployment
-live at https://revenue-recovery-intelligence.vercel.app.
+Verified 1 September 2026 against commit `a9f613d`: 640 unit tests passing,
+143 integration tests passing against a real database and real Razorpay Test
+Mode, clean `lint`, `typecheck` and `build`, valid Prisma schema with the
+database up to date on 11 migrations, production deployment live at
+https://revenue-recovery-intelligence.vercel.app.
 
 | Criterion | Evidence |
 |---|---|
 | **AI-native** | Read-only, evidence-grounded Operational Assistant ([`assistantService.ts`](apps/web/src/lib/assistant/assistantService.ts)) that answers through the same authorized query services the pages use. Every figure is classified `observed`, `estimated`, `validated_causal`, or `none`, so a model estimate can never be read as a measured fact. Model probabilities are persisted per risk event in `ModelPrediction`. Deliberately **not** a generative model in the decision path — see "Safety". |
 | **Revenue recovery** | Economic policy layer ([`economics.ts`](apps/web/src/lib/recovery/economics.ts), [`decisionEngine.ts`](apps/web/src/lib/recovery/decisionEngine.ts)) scoring `amount × (P(recovery \| intervention) − P(recovery \| none)) − cost − riskPenalty` in integer paise, rounded exactly once. Candidate strategies (`RETRY`, `PAYMENT_LINK`, `CAPTURE`, `CUSTOMER_CONTACT`) resolve to one of ACT / WAIT / STOP / ESCALATE. Golden-scenario tests pin the decision boundaries ([`decisionEngine.goldenScenarios.test.ts`](apps/web/src/lib/recovery/decisionEngine.goldenScenarios.test.ts)). |
-| **Razorpay integration** | Timing-safe HMAC-SHA256 webhook verification ([`signature.ts`](apps/web/src/lib/razorpay/signature.ts)); idempotent receiver keyed on `x-razorpay-event-id` ([`route.ts`](apps/web/src/app/api/webhooks/razorpay/route.ts)); server-side REST client for Payment Links and capture with timeout/failure classification ([`client.ts`](apps/web/src/lib/razorpay/client.ts), [`executionErrors.ts`](apps/web/src/lib/recovery/executionErrors.ts)). Inbound is verified on real Test Mode traffic. Outbound is **not currently verified**: the controlled integration test that creates a real Payment Link fails today because the configured Test Mode key returns `401 Authentication failed`. |
+| **Razorpay integration** | Timing-safe HMAC-SHA256 webhook verification ([`signature.ts`](apps/web/src/lib/razorpay/signature.ts)); idempotent receiver keyed on `x-razorpay-event-id` ([`route.ts`](apps/web/src/app/api/webhooks/razorpay/route.ts)); server-side REST client for Payment Links and capture with timeout/failure classification ([`client.ts`](apps/web/src/lib/razorpay/client.ts), [`executionErrors.ts`](apps/web/src/lib/recovery/executionErrors.ts)). **Verified:** Test Mode API authentication through the adapter itself; inbound delivery on real Test Mode traffic, through signature verification, persistence, association, risk creation, a real STOP decision, outcome attribution and audit; and outbound execution — `executeCommand` created a real Payment Link and recorded `Execution.status = SUCCEEDED` under a controlled integration test. **Not verified:** ACT on a real payment end to end — see "Open gaps". |
 | **Safety** | Deterministic pre-execution gate in fixed priority order ([`safetyGate.ts`](apps/web/src/lib/recovery/safetyGate.ts)) — already-succeeded, duplicate-execution risk, retry limit, cooldown, amount ceiling, active incident — returning exactly one fallback, never an ambiguous mix; an unsafe result cannot be overridden into ACT. Versioned merchant policy ([`policy.ts`](apps/web/src/lib/recovery/policy.ts)). Database-enforced execution idempotency via a unique `Execution.decisionId`. No LLM anywhere in the financial path. |
 | **Scale** | 21-model PostgreSQL schema with compound indexes on the paths that are actually queried (`merchantId`, `status`, `eventType`, `receivedAt`) and 11 migrations. The webhook route persists and returns before downstream work, handing off at an explicit processing boundary ([`queue.ts`](apps/web/src/lib/processing/queue.ts)) — honestly labelled in-process rather than dressed up as a durable queue. |
 | **Engineering** | 640 unit tests across 61 files and 143 integration tests across 20 files that run against a real database, kept in separate suites so the fast one never silently depends on network state. Clean `typecheck` and `build`. Multi-tenant authorization ([`merchantAccess.ts`](apps/web/src/lib/auth/merchantAccess.ts)), `scrypt` password hashing ([`password.ts`](apps/web/src/lib/auth/password.ts)), rate limiting ([`rateLimiter.ts`](apps/web/src/lib/rateLimit/rateLimiter.ts)). |
@@ -26,8 +27,14 @@ live at https://revenue-recovery-intelligence.vercel.app.
 
 These are real and stated deliberately:
 
-1. ACT execution has no production trigger — `executeCommand` is called by tests
-   only, and outbound Razorpay calls currently fail authentication.
+1. ACT has never run on a real payment, for two reasons inside this repository
+   rather than at Razorpay. `candidateBuilder.ts` hardcodes
+   `failureReason: "STATE_UNCERTAIN"` (Payment stores no structured failure
+   reason yet), and that reason's model confidence of `0.35` sits below the
+   policy's `minConfidence` of `0.5`, so real webhook traffic resolves to
+   ESCALATE rather than ACT. Separately, no production route or UI control
+   calls `executeCommand` — only the integration suite does. Outbound execution
+   against Razorpay Test Mode is itself verified.
 2. Recovery probabilities are hand-set baselines, not trained models.
 3. Causal measurement has been exercised on synthetic Demo Workspace data; the
    real Test Mode merchant has a single lifecycle.
