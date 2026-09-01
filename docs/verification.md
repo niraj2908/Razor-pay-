@@ -5,13 +5,14 @@ Every number here came from a command in this repository or a query against the
 database the deployment uses. Nothing in this file is estimated.
 
 **Date:** 1-2 September 2026
-**Commit:** `aef5059`
+**Commits:** passes verified at `352418b`, `a9f613d`, `aef5059`, and the executable-strategy work in §9
 **Branch:** `main`
 
-This log was written in three passes. The first ran against `352418b`; a second
+This log was written in four passes. The first ran against `352418b`; a second
 followed after the Razorpay Test Mode credentials were replaced and two defects
 were fixed; a third (§8) records the failure-diagnosis work that made ACT
-reachable for real traffic. Where an earlier pass's finding was later
+reachable for real traffic; a fourth (§9) records the executable-strategy fix
+that followed from it. Where an earlier pass's finding was later
 superseded, the entry says so rather than being quietly deleted.
 
 ## 1. Static checks
@@ -36,7 +37,7 @@ moved out of the working tree rather than committed or ignored.
 
 ## 2. Unit tests
 
-`pnpm test` (in `apps/web`) — **63 files, 668 tests, all passing**, ~5s, no
+`pnpm test` (in `apps/web`) — **63 files, 671 tests, all passing**, ~5s, no
 database access.
 
 ## 3. Integration tests
@@ -199,7 +200,7 @@ destructive action that has not been taken.
 `vercel ls` and `vercel inspect` against project
 `niraj-kumar-singh-s-projects/revenue-recovery-intelligence`:
 
-- Current production deployment: `revenue-recovery-intelligence-7d436bpcs.vercel.app`, status Ready, built from commit `aef5059` on `main` (confirmed via the deployment's `meta.githubCommitSha`; `vercel inspect --json` returns a trimmed object whose `meta` is empty, so the REST API is the reliable source).
+- Current production deployment: `revenue-recovery-intelligence-7d436bpcs.vercel.app`, status Ready, built from commit `aef5059` on `main` at the time of that check - production tracks `main`, so the serving deployment advances with every push (confirmed via the deployment's `meta.githubCommitSha`; `vercel inspect --json` returns a trimmed object whose `meta` is empty, so the REST API is the reliable source).
 - Stable production alias: **https://revenue-recovery-intelligence.vercel.app** (HTTP 200, redirects to `/login`).
 - The URL used in earlier documentation, `revenue-recovery-intelligence-qz2w9sykk.vercel.app`, is a **preview** deployment. It still responds, but it is not production and should not be cited as such.
 
@@ -245,7 +246,7 @@ Mode payment's amount - not by reading the tables:
 | `source=customer` | `CUSTOMER_ABANDONMENT` | 0.25 / 0.70 | ACT | PAYMENT_LINK | yes |
 | `source=bank` | `OTHER_RECOVERABLE` | 0.40 / 0.55 | ACT | PAYMENT_LINK | yes |
 | `source=business` | `CONFIRMED_FAILURE` | 0.05 / 0.90 | ACT | PAYMENT_LINK | yes |
-| `source=gateway` | `NETWORK_DEGRADATION` | 0.55 / 0.75 | ACT | RETRY | **no** |
+| `source=gateway` | `NETWORK_DEGRADATION` | 0.55 / 0.75 | ACT | RETRY | **no** *(fixed in §9 — now PAYMENT_LINK)* |
 | unrecognised code | `STATE_UNCERTAIN` | 0.35 / 0.35 | ESCALATE | none | n/a |
 | no signals | `STATE_UNCERTAIN` | 0.35 / 0.35 | ESCALATE | none | n/a |
 
@@ -261,15 +262,72 @@ control calls `executeCommand`.
 
 ### Two findings recorded rather than fixed
 
-- **`NETWORK_DEGRADATION` selects RETRY, which the executor rejects.** Razorpay
-  has no retry-a-failed-payment API, so `SUPPORTED_EXECUTION_STRATEGIES`
-  excludes it. The mismatch predates this work; the mapping makes it reachable
-  on real traffic for the first time. `decisionExecutability.test.ts` pins the
-  real behaviour, including `executeCommand` returning
-  `{status: "rejected", reason: "unsupported_strategy"}`. Nothing executes
-  decisions automatically, so no false claim of recovery can result - but this
-  must be resolved before execution is wired to any trigger.
+- **`NETWORK_DEGRADATION` selects RETRY, which the executor rejects.**
+  *(Resolved - see §9.)* Razorpay has no retry-a-failed-payment API, so
+  `SUPPORTED_EXECUTION_STRATEGIES` excludes it. The mismatch predates this
+  work; the mapping made it reachable on real traffic for the first time.
 - **`CONFIRMED_FAILURE` still reaches ACT** on a large enough amount, because
   the hand-set model gives PAYMENT_LINK a 0.03 uplift even there. That is a
   model-calibration question, not a mapping defect, and was left alone rather
   than tuned to produce a tidier table.
+
+## 9. Executable-strategy selection (2 September 2026)
+
+The §8 finding that the engine could select RETRY - an action Razorpay offers
+no API for - was fixed.
+
+The economics were never wrong: RETRY genuinely is the higher-value play for a
+network failure. What was wrong is that the engine could SELECT something the
+product cannot perform. So selection was restricted, not evaluation.
+
+- `executableStrategies.ts` holds one source of truth for what the Execution
+  Service can carry out. `executionService.ts` derives
+  `SUPPORTED_EXECUTION_STRATEGIES` from it, so the two layers cannot drift
+  apart. It is a separate module because the decision engine must not import
+  `executionService.ts` - that pulls in Prisma and the Razorpay client, and the
+  engine is a pure function that stays unit-testable without either.
+- Every strategy is still evaluated and still reported in the trace's
+  `expectedValues`; only `pickBestStrategy` is applied to the executable
+  subset.
+- The trace and the audit event carry `unexecutableBestStrategy`, so the trail
+  answers "why not the cheaper option?" rather than showing only what was
+  chosen.
+- Where no executable strategy is allowed at all, the engine returns ESCALATE
+  with reason `no_executable_strategy` rather than acting or giving up.
+
+### Decisions after the fix
+
+Measured the same way as §8, at ₹2,500:
+
+| Diagnosis | Highest expected value | Selected | Executable |
+|---|---|---|---|
+| `CUSTOMER_ABANDONMENT` | PAYMENT_LINK | PAYMENT_LINK | yes |
+| `OTHER_RECOVERABLE` | PAYMENT_LINK | PAYMENT_LINK | yes |
+| `CONFIRMED_FAILURE` | PAYMENT_LINK | PAYMENT_LINK | yes |
+| `NETWORK_DEGRADATION` | **RETRY (₹875)** | **PAYMENT_LINK (₹248)** | yes |
+| `STATE_UNCERTAIN` | - | ESCALATE (none) | n/a |
+
+No ACT decision can now name a strategy `executeCommand` would reject.
+
+### Tests changed as intent, not as churn
+
+Three tests encoded the previous behaviour and were rewritten rather than
+weakened: golden scenario 2 (which asserted ACT + RETRY), the demo
+`act_retry_network` scenario test, and the "known gap" block in
+`decisionExecutability.test.ts`, which its own docstring said to update rather
+than delete. Two demo labels that described a retry as the chosen strategy were
+corrected, since they would otherwise have misdescribed the seeded data.
+
+### Demo Workspace rebuilt
+
+The stored demo decisions predated the fix and still showed a `RETRY_NOW`
+chosen action the engine would no longer pick. The workspace was reset and
+reseeded through the project's own CLI. Counts are unchanged - 78 payments, 59
+risk events, 59 decisions, 24 executions, 53 outcomes, 59 `Decision` and 48
+`Execution` audit events - and every chosen action is now `PAYMENT_LINK` (54),
+while 58 `RETRY_NOW` candidate rows remain as evaluated-but-not-selected
+alternatives. That is the intended shape: the economics stay visible, the
+selection is executable.
+
+Isolation re-checked after the rebuild: no `REAL_RAZORPAY_TEST_MODE` row in the
+demo merchant, no `SIMULATED` row in the Test Mode merchant.

@@ -20,8 +20,7 @@ act when the answer is no, and prove the difference afterwards.
 | | |
 |---|---|
 | Production URL | https://revenue-recovery-intelligence.vercel.app |
-| Deployment | `revenue-recovery-intelligence-7d436bpcs.vercel.app` (Ready, Production) |
-| Commit deployed | `aef5059` |
+| Deployment | Production tracks `main`; every push deploys automatically |
 | Verified | 2 September 2026 |
 
 The Demo Workspace operator account (`demo-operator@revenue-recovery.demo`) is
@@ -56,7 +55,10 @@ is deliberately not printed in this repository.
 4. **Gates on safety and policy.** A deterministic safety gate runs in fixed
    priority order — already succeeded, duplicate execution risk, retry limit,
    cooldown, amount ceiling, active incident — and an unsafe result can never be
-   overridden into ACT.
+   overridden into ACT. Selection is further restricted to strategies the
+   Execution Service can actually perform
+   ([`executableStrategies.ts`](apps/web/src/lib/recovery/executableStrategies.ts)),
+   so the engine can never decide on an action the product cannot carry out.
 5. **Records why.** Each decision persists the inputs it was made from: a
    `ModelPrediction` row per candidate strategy (predicted probability plus the
    model version), a `CandidateAction` row per strategy (predicted success,
@@ -79,13 +81,13 @@ is deliberately not printed in this repository.
 
 | Check | Result |
 |---|---|
-| Unit tests (`pnpm test`, 63 files) | **668 passed** |
+| Unit tests (`pnpm test`, 63 files) | **671 passed** |
 | Integration tests (`pnpm test:integration`, 20 files) | **145 passed** |
 | `pnpm lint` | clean |
 | `pnpm typecheck` | clean |
 | `pnpm build` | clean (Next.js 16, Turbopack) |
 | `prisma validate` / `migrate status` | schema valid, 12 migrations, database up to date |
-| Production deployment | Ready, serving `aef5059` |
+| Production deployment | Ready; tracks `main`, every push deploys automatically |
 
 The integration suite includes `executionService.integration.test.ts`, which
 creates a real Payment Link in Razorpay Test Mode through the Execution
@@ -159,11 +161,12 @@ what did not:
   real `RevenueRiskEvent` has yet been diagnosed as anything but
   `STATE_UNCERTAIN`. The capability is tested; the evidence is not yet in the
   database.
-- **Known gap.** A network-degradation failure prices RETRY above PAYMENT_LINK,
-  and Razorpay has no retry-a-failed-payment API, so `executeCommand` rejects
-  that command. The mismatch is pinned by a test rather than papered over. It
-  is harmless while nothing executes automatically, and must be resolved before
-  anything does.
+- **Fixed.** The engine can no longer select a strategy the Execution Service
+  cannot perform. A network-degradation failure still prices RETRY highest —
+  and still reports it — but Razorpay has no retry-a-failed-payment API, so
+  selection falls to the best executable strategy and the trace records what
+  was passed over. Where nothing executable is allowed at all, the engine
+  escalates rather than deciding something it cannot carry out.
 
 So outbound execution against Razorpay is proven, the decision path on real data
 is proven, and the engine can now choose to act — but the pieces have never met
@@ -245,7 +248,7 @@ use are the ones in `.env`.
 ## Reproducing the verification
 
 ```bash
-pnpm test                                # 668 unit tests, no database
+pnpm test                                # 671 unit tests, no database
 pnpm typecheck && pnpm build             # clean
 pnpm --filter web test:integration       # 145 tests against DATABASE_URL (~8 min)
 pnpm --filter web db:seed:demo           # run LAST — the suite resets its own demo rows
@@ -272,9 +275,10 @@ See [SECURITY.md](SECURITY.md) and [ENGINEERING_PRINCIPLES.md](ENGINEERING_PRINC
 - ACT can now be chosen for real traffic, but nothing triggers it: no
   production route or UI control calls the execution service. Outbound Razorpay
   calls themselves are verified.
-- A network-degradation diagnosis selects RETRY, which Razorpay offers no API
-  for and the Execution Service rejects. Pinned by a test; must be resolved
-  before execution is wired to any trigger.
+- RETRY is priced but never performable: Razorpay offers no
+  retry-a-failed-payment API, so the engine reports its value and selects a
+  payment link instead. Recovering by retry would need a saved-token or
+  subscription capability this account does not have.
 - Recovery probabilities remain hand-set, so which diagnosis leads to ACT is a
   calibration choice, not a learned one. Notably a `CONFIRMED_FAILURE` still
   clears the action threshold on a large enough amount.
