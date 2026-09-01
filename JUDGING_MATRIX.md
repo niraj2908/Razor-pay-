@@ -1,18 +1,33 @@
 # Judging Matrix
 
-Frozen skeleton from Master Specification Section 39. Fill in the Evidence
-column as each capability actually ships -- an empty/TBD row is more honest
-than a claim you cannot back up in the repo.
+Every row points at code, tests, or database evidence in this repository. Where
+something is implemented but not yet demonstrated end-to-end on real Razorpay
+data, the row says so — an honest gap is more useful than an unbacked claim.
+
+Verified 1 September 2026 against commit `352418b`: 640 unit tests passing,
+142 of 143 integration tests passing (the exception is documented under
+"Razorpay integration"), clean `typecheck` and `build`, production deployment
+live at https://revenue-recovery-intelligence.vercel.app.
 
 | Criterion | Evidence |
 |---|---|
-| AI-native | TBD |
-| Revenue recovery | TBD |
-| Razorpay integration | TBD |
-| Safety | TBD |
-| Scale | TBD |
-| Engineering | TBD |
-| Innovation | TBD |
-| Business value | TBD |
-| Explainability | TBD |
-| Production readiness | TBD |
+| **AI-native** | Read-only, evidence-grounded Operational Assistant ([`assistantService.ts`](apps/web/src/lib/assistant/assistantService.ts)) that answers through the same authorized query services the pages use. Every figure is classified `observed`, `estimated`, `validated_causal`, or `none`, so a model estimate can never be read as a measured fact. Model probabilities are persisted per risk event in `ModelPrediction`. Deliberately **not** a generative model in the decision path — see "Safety". |
+| **Revenue recovery** | Economic policy layer ([`economics.ts`](apps/web/src/lib/recovery/economics.ts), [`decisionEngine.ts`](apps/web/src/lib/recovery/decisionEngine.ts)) scoring `amount × (P(recovery \| intervention) − P(recovery \| none)) − cost − riskPenalty` in integer paise, rounded exactly once. Candidate strategies (`RETRY`, `PAYMENT_LINK`, `CAPTURE`, `CUSTOMER_CONTACT`) resolve to one of ACT / WAIT / STOP / ESCALATE. Golden-scenario tests pin the decision boundaries ([`decisionEngine.goldenScenarios.test.ts`](apps/web/src/lib/recovery/decisionEngine.goldenScenarios.test.ts)). |
+| **Razorpay integration** | Timing-safe HMAC-SHA256 webhook verification ([`signature.ts`](apps/web/src/lib/razorpay/signature.ts)); idempotent receiver keyed on `x-razorpay-event-id` ([`route.ts`](apps/web/src/app/api/webhooks/razorpay/route.ts)); server-side REST client for Payment Links and capture with timeout/failure classification ([`client.ts`](apps/web/src/lib/razorpay/client.ts), [`executionErrors.ts`](apps/web/src/lib/recovery/executionErrors.ts)). Inbound is verified on real Test Mode traffic. Outbound is **not currently verified**: the controlled integration test that creates a real Payment Link fails today because the configured Test Mode key returns `401 Authentication failed`. |
+| **Safety** | Deterministic pre-execution gate in fixed priority order ([`safetyGate.ts`](apps/web/src/lib/recovery/safetyGate.ts)) — already-succeeded, duplicate-execution risk, retry limit, cooldown, amount ceiling, active incident — returning exactly one fallback, never an ambiguous mix; an unsafe result cannot be overridden into ACT. Versioned merchant policy ([`policy.ts`](apps/web/src/lib/recovery/policy.ts)). Database-enforced execution idempotency via a unique `Execution.decisionId`. No LLM anywhere in the financial path. |
+| **Scale** | 21-model PostgreSQL schema with compound indexes on the paths that are actually queried (`merchantId`, `status`, `eventType`, `receivedAt`) and 11 migrations. The webhook route persists and returns before downstream work, handing off at an explicit processing boundary ([`queue.ts`](apps/web/src/lib/processing/queue.ts)) — honestly labelled in-process rather than dressed up as a durable queue. |
+| **Engineering** | 640 unit tests across 61 files and 143 integration tests across 20 files that run against a real database, kept in separate suites so the fast one never silently depends on network state. Clean `typecheck` and `build`. Multi-tenant authorization ([`merchantAccess.ts`](apps/web/src/lib/auth/merchantAccess.ts)), `scrypt` password hashing ([`password.ts`](apps/web/src/lib/auth/password.ts)), rate limiting ([`rateLimiter.ts`](apps/web/src/lib/rateLimit/rateLimiter.ts)). |
+| **Innovation** | Counterfactual measurement rather than activity reporting: randomized assignment ([`assignmentEngine.ts`](apps/web/src/lib/experiments/assignmentEngine.ts)), control enforcement in the execution path ([`executionService.controlEnforcement.integration.test.ts`](apps/web/src/lib/recovery/executionService.controlEnforcement.integration.test.ts)), and a result status machine where `VALID_EFFECT` is reachable **only** under a caller-configured minimum-effect threshold ([`resultStatus.ts`](apps/web/src/lib/experiments/measurement/resultStatus.ts)). Snapshots are versioned, so a recalculation never silently rewrites a published result. |
+| **Business value** | Overview reports recoverable GMV, natural versus intervention recovery, and decision mix; Reports exports the same figures as CSV ([`csvReport.ts`](apps/web/src/lib/reports/csvReport.ts)) and PDF ([`pdfReport.ts`](apps/web/src/lib/reports/pdfReport.ts)) for an operator to take away. The product's value claim is deliberately conservative: it reports incremental recovery it can attribute, and marks the rest `NATURAL_RECOVERY`. |
+| **Explainability** | `DecisionEvidence` rows persist the inputs and reasoning behind each decision and are rendered on Decision Detail; a merchant-wide audit trail records every decision, execution, and policy action with entity-type filtering ([`decisionAuditService.ts`](apps/web/src/lib/recovery/decisionAuditService.ts)). The Assistant explains from those same rows and cites what kind of evidence each number is. |
+| **Production readiness** | Live Vercel deployment serving the current commit; deterministic seed/reset tooling for the Demo Workspace ([`seedDemoWorkspace.ts`](apps/web/src/lib/demo/seedDemoWorkspace.ts)) whose identity is structurally separate from the identity the test suite uses; Razorpay Test Mode workspace provisioning ([`provisionWorkspace.ts`](apps/web/src/lib/razorpayTestMode/provisionWorkspace.ts)); Razorpay lifecycle status derived from the database at request time rather than hardcoded ([`lifecycleVerification.ts`](apps/web/src/lib/razorpay/lifecycleVerification.ts)); sanitized error responses that do not leak stack traces. |
+
+## Open gaps
+
+These are real and stated deliberately:
+
+1. ACT execution has no production trigger — `executeCommand` is called by tests
+   only, and outbound Razorpay calls currently fail authentication.
+2. Recovery probabilities are hand-set baselines, not trained models.
+3. Causal measurement has been exercised on synthetic Demo Workspace data; the
+   real Test Mode merchant has a single lifecycle.
