@@ -69,11 +69,18 @@ is deliberately not printed in this repository.
    Decision Detail page renders exactly those rows. The schema also defines a
    `DecisionEvidence` table, but **no code path writes to it today and it is
    empty** — the reasoning above is what actually backs the page.
-6. **Measures causality.** Randomized treatment/control assignment with 95%
+6. **Executes only when an operator says so.** An un-executed ACT decision
+   carries an Execute control on Decision Detail, which calls
+   `POST /api/recovery/decisions/[decisionId]/execute`. The endpoint loads the
+   stored decision scoped to the operator's merchant and hands it to the
+   Execution Service unchanged — it cannot turn a WAIT, STOP or ESCALATE into
+   an ACT, and cannot substitute a different strategy. Execution is
+   **operator-approved, never autonomous**.
+7. **Measures causality.** Randomized treatment/control assignment with 95%
    confidence intervals, where a result may only reach `VALID_EFFECT` under an
    explicitly configured minimum-effect threshold — natural recovery is never
    allowed to read as lift.
-7. **Explains, read-only.** The Assistant answers operational questions from the
+8. **Explains, read-only.** The Assistant answers operational questions from the
    same authorized query services the pages use, and labels every figure as
    `observed`, `estimated`, `validated_causal`, or `none`.
 
@@ -110,8 +117,9 @@ reading that as a code defect.
 | Experiments & causal measurement | **Real, on synthetic data** | Randomized assignment and `VALID_EFFECT` measurement run over the Demo Workspace |
 | Razorpay Test Mode API authentication | **Real, verified** | Live credentials authenticate through the application's own adapter ([`client.ts`](apps/web/src/lib/razorpay/client.ts)) |
 | Payment Link creation (outbound execution) | **Real, verified at the service layer** | `executeCommand` created a real Test Mode Payment Link and recorded `Execution.status = SUCCEEDED` with its `plink_…` reference, driven by a controlled integration test |
-| ACT on a real payment, end to end | **Not verified — see below** | The engine can now choose ACT for a real failure, but no real payment has produced one yet, and no production route or UI control calls `executeCommand` |
-| Autonomous execution loop | **Not built** | Execution is deliberately operator-free for now; see [`docs/decision-engine.md`](docs/decision-engine.md) §10 |
+| Operator execution trigger | **Implemented, integration-tested** | `POST /api/recovery/decisions/[decisionId]/execute` ([`decisionExecutionService.ts`](apps/web/src/lib/recovery/decisionExecutionService.ts)) — merchant-scoped, duplicate-safe, audited; exercised against a real database with Razorpay mocked |
+| ACT on a real payment, end to end | **Not verified — see below** | The engine can choose ACT and an operator can now trigger it, but no real failing payment has produced an ACT decision that was then executed |
+| Autonomous execution loop | **Not built, deliberately** | Nothing executes a decision without an operator; see [`docs/decision-engine.md`](docs/decision-engine.md) §10 |
 | Recovery probability models | **Cold-start baselines** | Hand-set lookup tables with retry decay ([`naturalRecoveryModel.ts`](apps/web/src/lib/recovery/naturalRecoveryModel.ts)); every estimate carries `modelVersion`/`confidence` |
 | Tokenized card auto-retry | **Not built** | Requires saved-token/subscription access on a live merchant account |
 | Trained ML pipeline | **Not built** | Needs historical treatment/control outcomes that do not exist yet |
@@ -154,9 +162,11 @@ what did not:
   failure produces ACT with PAYMENT_LINK — a strategy the Execution Service
   supports. Verified by running the real engine per diagnosis, not asserted
   ([`decisionExecutability.test.ts`](apps/web/src/lib/recovery/decisionExecutability.test.ts)).
-- **Still open.** Nothing in the running application calls `executeCommand`.
-  The processing boundary runs association → candidate build → outcome
-  attribution and stops; execution is exercised only by the integration suite.
+- **Fixed.** `executeCommand` has a production caller:
+  `POST /api/recovery/decisions/[decisionId]/execute`, reached from the Execute
+  control that Decision Detail shows only for an un-executed ACT decision. The
+  webhook processing boundary still stops at outcome attribution — no decision
+  is ever executed without an operator asking for it.
 - **Still open.** No real payment has arrived since the mapping shipped, so no
   real `RevenueRiskEvent` has yet been diagnosed as anything but
   `STATE_UNCERTAIN`. The capability is tested; the evidence is not yet in the
@@ -169,11 +179,44 @@ what did not:
   escalates rather than deciding something it cannot carry out.
 
 So outbound execution against Razorpay is proven, the decision path on real data
-is proven, and the engine can now choose to act — but the pieces have never met
-on a real payment. The Security &
+is proven, the engine can choose to act, and an operator can now trigger it —
+but the pieces have never met on a real payment. **Real ACT end to end remains
+unverified**, and it needs one thing this repository cannot supply: a genuine
+failing Test Mode checkout whose failure signals map to an ACT decision, which
+an operator then executes. The Security &
 Policies page derives this status from the database at request time
 ([`lifecycleVerification.ts`](apps/web/src/lib/razorpay/lifecycleVerification.ts))
 rather than asserting it in prose, so it cannot go stale.
+
+## Executing a decision
+
+The Execute control appears on Decision Detail only for an ACT decision that has
+not been executed. What the endpoint behind it guarantees:
+
+- **Operator-approved, never autonomous.** No code path executes a decision on
+  its own; the webhook pipeline stops at outcome attribution.
+- **Merchant-scoped ownership.** The decision is loaded through
+  `revenueRiskEvent: { merchantId }` derived from the operator's session. The
+  route accepts no merchant parameter and no body. Another merchant's decision
+  is indistinguishable from one that does not exist — both 404.
+- **It cannot re-decide.** A WAIT, STOP or ESCALATE decision is refused
+  (`decision_not_act`); the strategy comes from the stored decision and cannot
+  be substituted by the caller.
+- **Staleness still enforced at 30 minutes.** A decision older than
+  `MAX_DECISION_AGE_MS` is refused as `decision_stale` — the world may have
+  changed since it was made. The operator is told exactly that.
+- **Duplicate execution is prevented.** `Execution.decisionId` is unique, so a
+  second trigger returns the existing execution and makes no second Razorpay
+  call.
+- **Every attempt is audited.** `execution.requested` then
+  `execution.succeeded` / `execution.failed` / `execution.skipped`.
+- **Failures are not disguised as success.** A definitive Razorpay failure
+  returns 502; a refusal returns 409 with its reason shown verbatim to the
+  operator.
+- **Ambiguous results demand review, not retry.** A timeout or network failure
+  is recorded as ambiguous and returned as 202 — the Razorpay call may have
+  landed, so the UI asks the operator to reload rather than inviting a blind
+  retry.
 
 ## Demo Workspace
 
@@ -272,9 +315,11 @@ See [SECURITY.md](SECURITY.md) and [ENGINEERING_PRINCIPLES.md](ENGINEERING_PRINC
 ## Known limitations
 
 - Recovery probabilities are hand-set baselines, not trained models.
-- ACT can now be chosen for real traffic, but nothing triggers it: no
-  production route or UI control calls the execution service. Outbound Razorpay
-  calls themselves are verified.
+- Real ACT end to end is still unverified. It requires a genuine failing Test
+  Mode checkout whose failure signals map to an ACT decision, which an operator
+  then executes — a person has to put a card through checkout, so it cannot be
+  produced from this repository.
+- Execution is operator-approved only. There is no autonomous loop, by choice.
 - RETRY is priced but never performable: Razorpay offers no
   retry-a-failed-payment API, so the engine reports its value and selects a
   payment link instead. Recovering by retry would need a saved-token or

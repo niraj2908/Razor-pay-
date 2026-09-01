@@ -8,11 +8,11 @@ database the deployment uses. Nothing in this file is estimated.
 **Commits:** passes verified at `352418b`, `a9f613d`, `aef5059`, and the executable-strategy work in §9
 **Branch:** `main`
 
-This log was written in four passes. The first ran against `352418b`; a second
+This log was written in five passes. The first ran against `352418b`; a second
 followed after the Razorpay Test Mode credentials were replaced and two defects
 were fixed; a third (§8) records the failure-diagnosis work that made ACT
 reachable for real traffic; a fourth (§9) records the executable-strategy fix
-that followed from it. Where an earlier pass's finding was later
+that followed from it; a fifth (§10) records the operator execution trigger. Where an earlier pass's finding was later
 superseded, the entry says so rather than being quietly deleted.
 
 ## 1. Static checks
@@ -37,12 +37,12 @@ moved out of the working tree rather than committed or ignored.
 
 ## 2. Unit tests
 
-`pnpm test` (in `apps/web`) — **63 files, 671 tests, all passing**, ~5s, no
+`pnpm test` (in `apps/web`) — **64 files, 686 tests, all passing**, ~5s, no
 database access.
 
 ## 3. Integration tests
 
-`pnpm test:integration` (in `apps/web`) — **20 files, 145 tests**, ~7-8 minutes
+`pnpm test:integration` (in `apps/web`) — **21 files, 150 tests**, ~7-8 minutes
 against the live Postgres pooler.
 
 **Final state: all 143 pass.** Getting there surfaced two genuine problems and
@@ -139,7 +139,9 @@ verified**. Two separate things block it, both inside this repository:
    safety gate resolves to ESCALATE — at any amount. The code comment marks
    `contextFromPayment` as the one place that changes once the webhook captures
    a real failure reason.
-2. **Nothing in the running application executes a decision.**
+2. **Nothing in the running application executes a decision.** *(Superseded on
+   2 September — see §10, which added an operator-triggered endpoint. The
+   webhook processing path still stops at outcome attribution.)*
    `executeCommand` has no production caller — no API route, no UI control. The
    processing boundary runs association → candidate build → outcome
    attribution, and stops.
@@ -224,7 +226,8 @@ Stated precisely, so no row can be read as more than it is:
 | Inbound webhook lifecycle on real data | Verified through signature check, persistence, association, risk creation, decision, outcome attribution, audit, UI and reports |
 | STOP branch on real Razorpay data | Verified |
 | Engine able to choose ACT for a real failure | Verified by running the real engine per diagnosis (§8); not yet exercised by live traffic |
-| ACT on a real payment, end to end | **Not verified** — no real payment has produced an ACT decision, and no production caller executes decisions (§4, §8) |
+| Operator execution trigger | Implemented and integration-tested against a real database (§10); not yet used on a real ACT decision |
+| ACT on a real payment, end to end | **Not verified** — no real failing payment has produced an ACT decision that an operator then executed (§4, §8, §10) |
 | Experiments and causal measurement | Verified on synthetic Demo Workspace data only |
 
 ## 8. Failure diagnosis (2 September 2026)
@@ -257,8 +260,8 @@ The same outcomes hold at ₹250, so they are not amount-boundary artefacts.
 It proves the engine can choose an executable ACT for a real failure. It does
 not prove ACT end to end: no real payment has arrived since the mapping
 shipped, so every real `RevenueRiskEvent` in the database still carries the
-`STATE_UNCERTAIN` diagnosis it was created with, and no production route or UI
-control calls `executeCommand`.
+`STATE_UNCERTAIN` diagnosis it was created with. (The missing production caller
+noted here was added afterwards — see §10.)
 
 ### Two findings recorded rather than fixed
 
@@ -331,3 +334,71 @@ selection is executable.
 
 Isolation re-checked after the rebuild: no `REAL_RAZORPAY_TEST_MODE` row in the
 demo merchant, no `SIMULATED` row in the Test Mode merchant.
+
+## 10. Operator execution trigger (2 September 2026)
+
+`executeCommand` now has a production caller:
+`POST /api/recovery/decisions/[decisionId]/execute`, backed by
+`decisionExecutionService.ts` and reached from an Execute control that
+Decision Detail renders **only** for an ACT decision with no execution yet.
+
+Execution is **operator-approved, never autonomous**. The webhook processing
+path is unchanged and still stops at outcome attribution; nothing a webhook
+delivers can move money on its own.
+
+### What the endpoint does and cannot do
+
+- Loads the decision scoped by `revenueRiskEvent: { merchantId }`, with the
+  merchant taken from the operator's session. The route accepts no merchant
+  parameter and no request body.
+- Cannot re-decide. A WAIT, STOP or ESCALATE decision is refused
+  (`decision_not_act`), and the strategy is the one already stored on the
+  decision - a caller cannot substitute another.
+- Leaves every existing gate in force: the 30-minute decision-staleness window
+  (`MAX_DECISION_AGE_MS`, unchanged), the supported-strategy list, and the
+  experiment CONTROL-arm block inside `executeCommand`.
+- Collapses duplicates on the unique `Execution.decisionId`: a second trigger
+  returns the existing execution and makes no second Razorpay call.
+- Records `execution.requested` and then `execution.succeeded` /
+  `execution.failed` / `execution.skipped`.
+- Never disguises a failure as success: a definitive Razorpay failure is 502, a
+  refusal is 409 with its reason, and an **ambiguous** result (timeout or
+  network failure, where the Razorpay call may or may not have landed) is 202,
+  which the UI presents as "reload and review" rather than inviting a blind
+  retry.
+
+### Tests
+
+15 route unit tests: authentication, merchant derived from the session only,
+404 for both nonexistent and foreign-merchant decisions, every result-status
+mapping, path-traversal id rejection, and a sanitized 500 carrying no stack
+trace.
+
+5 integration tests against the real database with the Razorpay client mocked -
+a real Test Mode Payment Link is already proven by
+`executionService.integration.test.ts` (§3.1), and re-proving it here would
+consume account quota for nothing:
+
+- another merchant's ACT decision returns `not_found`, with no Razorpay call and
+  no execution row created;
+- a non-ACT decision and an ACT decision with no chosen action are both refused
+  before any call;
+- a successful execution records the `Execution` row and both audit events;
+- a second trigger on the same decision produces exactly one execution row and
+  exactly one Razorpay call.
+
+### Evidence status after this pass
+
+| Claim | Status |
+|---|---|
+| Razorpay Test Mode API authentication | **Verified** |
+| Real webhook lifecycle (delivery → signature → persistence → association → risk → decision → outcome → audit) | **Verified** |
+| Real service-layer Payment Link execution | **Verified** |
+| Operator execution trigger | **Implemented and integration-tested** |
+| Real failing Test Mode payment → ACT → operator click → real Payment Link | **NOT YET VERIFIED** |
+
+The remaining gap is evidence, not capability. It requires a genuine failing
+Test Mode checkout whose failure signals map to an ACT decision, executed by a
+person - which means someone putting a card through Razorpay's checkout. No
+part of that can be produced from this repository, and nothing here claims it
+has been.

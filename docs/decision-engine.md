@@ -143,13 +143,29 @@ called from the same processing boundary immediately before this builder
 runs. The builder still fails safe and skips rather than fabricating a
 merchant/payment to attach to if association could not resolve one.
 
-## 10. Execution boundary (deferred)
+## 10. Execution boundary (operator-approved)
 
 ```
 Decision Engine -> Execution Command -> Execution Service -> Razorpay Adapter -> Razorpay API
 ```
 
-`execution.ts` builds a plain `{ action: "ACT", strategy, paymentId,
-decisionId }` command from an ACT decision and logs it. It does **not**
-call `RazorpayClient`. Actual autonomous execution is explicitly a later
-phase.
+Two distinct paths reach the Execution Service, and only one of them is
+wired to Razorpay.
+
+`execution.ts` still builds a plain `{ action: "ACT", strategy, paymentId,
+decisionId }` command from an ACT decision on the webhook processing path
+and only **logs** it. That path deliberately does not call
+`RazorpayClient`: nothing a webhook delivers can move money on its own.
+
+The second path is an operator asking for it. `POST
+/api/recovery/decisions/[decisionId]/execute` (`decisionExecutionService.ts`)
+loads the stored decision scoped by `revenueRiskEvent: { merchantId }` and
+hands it to `executeCommand` unchanged. It re-decides nothing: a WAIT, STOP
+or ESCALATE decision is refused, the strategy is the one already recorded,
+and every existing check still applies - the 30-minute decision-staleness
+window, the supported-strategy list, and the CONTROL-arm block. Duplicate
+triggers collapse on the unique `Execution.decisionId`, so a second click
+returns the existing execution without a second Razorpay call.
+
+Autonomous execution - a decision carried out with no human in the loop -
+remains explicitly not built.
