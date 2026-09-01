@@ -44,7 +44,7 @@ export type DemoDecisionScenario = {
 export const DEMO_DECISION_SCENARIOS: DemoDecisionScenario[] = [
   {
     key: "act_retry_network",
-    label: "Network degradation, ₹5,000 — best strategy is an automated retry",
+    label: "Network degradation, ₹5,000 — a retry scores highest but cannot be executed",
     diagnosis: "NETWORK_DEGRADATION",
     amountPaise: 500_000,
     paymentMethod: "upi",
@@ -77,7 +77,7 @@ export const DEMO_DECISION_SCENARIOS: DemoDecisionScenario[] = [
   },
   {
     key: "act_retry_network_repeat",
-    label: "Network degradation, ₹4,499, second attempt — still worth an automated retry",
+    label: "Network degradation, ₹4,499, second attempt — still worth intervening",
     diagnosis: "NETWORK_DEGRADATION",
     amountPaise: 449_900,
     paymentMethod: "upi",

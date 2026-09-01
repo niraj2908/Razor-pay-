@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { RazorpayClient } from "@/lib/razorpay/client";
 import { classifyRazorpayError } from "./executionErrors";
 import { RecoveryAction, Strategy } from "./types";
+import { EXECUTABLE_STRATEGIES } from "./executableStrategies";
 
 /**
  * A strategy value as it arrives on a command at the Execution Service
@@ -33,7 +34,15 @@ export type ExecutionCommand = {
 // Phase 22 Step 1 finding: Razorpay has no "retry a failed payment" API.
 // RETRY and OTHER_ALLOWED_STRATEGY are therefore deliberately excluded -
 // only strategies with a real, verified Razorpay API action are here.
-export const SUPPORTED_EXECUTION_STRATEGIES: readonly CommandStrategy[] = ["PAYMENT_LINK", "CAPTURE"];
+//
+// Derived from EXECUTABLE_STRATEGIES so the decision engine and this
+// service can never drift into disagreeing about what is performable;
+// CAPTURE is added here because it is an execution-layer capability the
+// engine never selects.
+export const SUPPORTED_EXECUTION_STRATEGIES: readonly CommandStrategy[] = [
+  ...EXECUTABLE_STRATEGIES,
+  "CAPTURE",
+];
 
 // A decision older than this is not trusted - the world may have changed
 // since it was made. Deliberately conservative for this first execution

@@ -5,6 +5,7 @@ import { estimateInterventionResponse } from "./interventionResponseModel";
 import { calculateExpectedIncrementalValue, EconomicResult } from "./economics";
 import { DEFAULT_POLICY, evaluatePolicy, PolicyConfig, PolicyResult } from "./policy";
 import { evaluateSafety, SafetyResult } from "./safetyGate";
+import { isExecutableStrategy } from "./executableStrategies";
 
 // Above this natural-recovery probability, intervening when it wouldn't
 // add incremental value is treated as unnecessary spend, not a missed
@@ -38,6 +39,15 @@ export type RecoveryDecisionTrace = {
   expectedValues: Record<string, number>;
   selectedAction: RecoveryAction;
   selectedStrategy: Strategy | null;
+  /**
+   * Set when the highest-value strategy was NOT one the Execution Service
+   * can perform, so selection fell to the best executable alternative (or
+   * to ESCALATE when there was none). Null when the best strategy overall
+   * was chosen, which is the ordinary case. Recorded so the audit trail can
+   * answer "why not the cheaper option?" - its economics are still in
+   * `expectedValues`.
+   */
+  unexecutableBestStrategy: Strategy | null;
   safetyResults: SafetyResult;
   policyResults: PolicyResult | null;
   reason: string;
@@ -84,18 +94,32 @@ export function evaluateRecoveryDecision(
     return { strategy, intervention, economics };
   });
 
-  const best = pickBestStrategy(evaluations);
+  // The engine may only SELECT a strategy the Execution Service can carry
+  // out - otherwise it can decide ACT on something the product cannot
+  // perform (Razorpay has no retry-a-failed-payment API). Every strategy is
+  // still evaluated and still reported in `expectedValues`, so restricting
+  // selection never hides the economics.
+  const bestOverall = pickBestStrategy(evaluations);
+  const executableEvaluations = evaluations.filter((evaluation) =>
+    isExecutableStrategy(evaluation.strategy)
+  );
+  const best = executableEvaluations.length > 0 ? pickBestStrategy(executableEvaluations) : null;
+  const unexecutableBestStrategy = isExecutableStrategy(bestOverall.strategy)
+    ? null
+    : bestOverall.strategy;
+
   const safetyResult = evaluateSafety(context, policy);
-  const policyResult = safetyResult.safe
-    ? evaluatePolicy(
-        {
-          strategy: best.strategy,
-          paymentMethod: context.paymentMethod,
-          customerContactCount: context.customerContactCount,
-        },
-        policy
-      )
-    : null;
+  const policyResult =
+    safetyResult.safe && best
+      ? evaluatePolicy(
+          {
+            strategy: best.strategy,
+            paymentMethod: context.paymentMethod,
+            customerContactCount: context.customerContactCount,
+          },
+          policy
+        )
+      : null;
 
   const expectedValues = Object.fromEntries(
     evaluations.map((e) => [e.strategy, e.economics.expectedIncrementalValue])
@@ -108,6 +132,12 @@ export function evaluateRecoveryDecision(
   if (!safetyResult.safe) {
     selectedAction = safetyResult.recommendedFallback as RecoveryAction;
     reason = `safety_gate:${safetyResult.reasons.join(",")}`;
+  } else if (!best) {
+    // Nothing on the table can actually be executed - e.g. a policy that
+    // allows only RETRY. Acting is impossible and giving up is not the
+    // engine's call, so a human decides.
+    selectedAction = "ESCALATE";
+    reason = "no_executable_strategy";
   } else if (!policyResult!.allowed) {
     selectedAction = "STOP";
     reason = `policy_violation:${policyResult!.violations.join(",")}`;
@@ -147,6 +177,7 @@ export function evaluateRecoveryDecision(
     expectedValues,
     selectedAction,
     selectedStrategy,
+    unexecutableBestStrategy,
     safetyResults: safetyResult,
     policyResults: policyResult,
     reason,

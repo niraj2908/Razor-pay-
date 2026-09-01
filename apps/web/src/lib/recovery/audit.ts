@@ -5,6 +5,10 @@ export type RecoveryAuditEvent = {
   paymentId: string;
   selectedAction: string;
   selectedStrategy: string | null;
+  /** The higher-value strategy that was passed over because the Execution
+   * Service cannot perform it, or null when the best strategy was chosen.
+   * Present so the trail can answer "why not the cheaper option?". */
+  unexecutableBestStrategy: string | null;
   policyVersion: string;
   modelVersion: string;
   reason: string;
@@ -23,6 +27,7 @@ export function buildRecoveryAuditEvent(trace: RecoveryDecisionTrace): RecoveryA
     paymentId: trace.paymentId,
     selectedAction: trace.selectedAction,
     selectedStrategy: trace.selectedStrategy,
+    unexecutableBestStrategy: trace.unexecutableBestStrategy,
     policyVersion: trace.policyVersion,
     modelVersion: trace.modelVersion,
     reason: trace.reason,

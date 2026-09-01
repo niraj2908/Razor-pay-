@@ -39,15 +39,21 @@ describe("golden scenario 1: high natural recovery -> WAIT", () => {
 });
 
 describe("golden scenario 2: strong intervention uplift -> ACT", () => {
-  it("acts with RETRY when a transient network failure has a large, cheap recovery uplift", () => {
+  // Previously this asserted ACT + RETRY. RETRY still wins on economics for
+  // a network failure and is still reported in expectedValues - but Razorpay
+  // has no retry-a-failed-payment API, so the engine may not SELECT it. It
+  // acts with the best executable strategy instead and records the one it
+  // could not use.
+  it("acts on a transient network failure, choosing the best strategy that can actually be executed", () => {
     const trace = evaluateRecoveryDecision({
       ...BASE,
       failureReason: "NETWORK_DEGRADATION",
       amount: 20000,
     });
     expect(trace.selectedAction).toBe("ACT");
-    expect(trace.selectedStrategy).toBe("RETRY");
     expect(trace.expectedValues.RETRY).toBeGreaterThan(0);
+    expect(trace.selectedStrategy).toBe("PAYMENT_LINK");
+    expect(trace.unexecutableBestStrategy).toBe("RETRY");
   });
 });
 

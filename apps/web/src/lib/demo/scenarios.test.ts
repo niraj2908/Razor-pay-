@@ -27,11 +27,13 @@ describe("Demo Workspace decision scenarios against the real decision engine", (
     expect(decisions).toEqual(new Set(["ACT", "WAIT", "STOP", "ESCALATE"]));
   });
 
-  it("act_retry_network legitimately selects the RETRY strategy (not executable by the real Execution Service)", () => {
+  it("act_retry_network prices RETRY highest but selects the executable PAYMENT_LINK instead", () => {
     const scenario = DEMO_DECISION_SCENARIOS.find((s) => s.key === "act_retry_network")!;
     const context = buildScenarioContext(scenario, "p", "m");
     const trace = evaluateRecoveryDecision(context);
-    expect(trace.selectedStrategy).toBe("RETRY");
+    expect(trace.expectedValues.RETRY).toBeGreaterThan(trace.expectedValues.PAYMENT_LINK);
+    expect(trace.selectedStrategy).toBe("PAYMENT_LINK");
+    expect(trace.unexecutableBestStrategy).toBe("RETRY");
   });
 
   it("act_payment_link_abandonment and act_payment_link_other_recoverable legitimately select PAYMENT_LINK", () => {

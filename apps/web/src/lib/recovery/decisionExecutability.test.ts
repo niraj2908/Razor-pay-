@@ -69,23 +69,16 @@ describe("a diagnosis the failure mapping produces -> a decision the executor ca
   });
 });
 
-describe("KNOWN GAP: NETWORK_DEGRADATION selects a strategy the executor cannot perform", () => {
+describe("a strategy the executor cannot perform is never selected", () => {
   /**
-   * This documents a real mismatch rather than asserting desired behaviour.
-   * `DEFAULT_POLICY.allowedStrategies` includes RETRY, and for a network
-   * failure the engine prices RETRY above PAYMENT_LINK - but Razorpay has
-   * no retry-a-failed-payment API, so `SUPPORTED_EXECUTION_STRATEGIES`
-   * excludes it and `executeCommand` rejects the command.
-   *
-   * The mismatch predates the failure mapping; the mapping makes it
-   * REACHABLE on real traffic for the first time, which is why it is pinned
-   * here. Today nothing executes decisions automatically, so no false claim
-   * of recovery can be made - the command is only logged.
-   *
-   * When the mismatch is fixed, this test must be UPDATED to assert the new
-   * behaviour, not deleted.
+   * This replaces a test that pinned the opposite behaviour. RETRY used to
+   * win selection for a network failure and `executeCommand` then rejected
+   * the command - the engine could decide an action the product could not
+   * perform. Selection is now restricted to executable strategies, while
+   * RETRY is still evaluated and still reported, so the economics stay
+   * visible and the audit records what was passed over.
    */
-  it("selects RETRY for a gateway-side failure", () => {
+  it("prices RETRY highest for a gateway-side failure but selects an executable strategy", () => {
     const reason = mapRazorpayFailureToReason({
       errorSource: "gateway",
       errorCode: "GATEWAY_ERROR",
@@ -96,11 +89,37 @@ describe("KNOWN GAP: NETWORK_DEGRADATION selects a strategy the executor cannot 
 
     const trace = evaluateRecoveryDecision(failedPaymentContext(reason, REPRESENTATIVE_AMOUNT));
     expect(trace.selectedAction).toBe("ACT");
-    expect(trace.selectedStrategy).toBe("RETRY");
-    expect(SUPPORTED_EXECUTION_STRATEGIES).not.toContain("RETRY");
+    // The economics are unchanged and still visible...
+    expect(trace.expectedValues.RETRY).toBeGreaterThan(trace.expectedValues.PAYMENT_LINK);
+    // ...but the engine selects only what can be carried out, and says what
+    // it could not use.
+    expect(SUPPORTED_EXECUTION_STRATEGIES).toContain(trace.selectedStrategy);
+    expect(trace.unexecutableBestStrategy).toBe("RETRY");
   });
 
-  it("and the Execution Service rejects that command instead of attempting anything", async () => {
+  it("holds for every diagnosis the failure mapping can produce", () => {
+    const diagnoses: FailureReason[] = [
+      "CUSTOMER_ABANDONMENT",
+      "OTHER_RECOVERABLE",
+      "CONFIRMED_FAILURE",
+      "NETWORK_DEGRADATION",
+      "STATE_UNCERTAIN",
+      "PENDING",
+    ];
+
+    for (const diagnosis of diagnoses) {
+      const trace = evaluateRecoveryDecision(
+        failedPaymentContext(diagnosis, REPRESENTATIVE_AMOUNT)
+      );
+      if (trace.selectedAction === "ACT") {
+        expect(SUPPORTED_EXECUTION_STRATEGIES).toContain(trace.selectedStrategy);
+      } else {
+        expect(buildExecutionCommand(trace)).toBeNull();
+      }
+    }
+  });
+
+  it("the Execution Service still refuses a RETRY command reaching it by any other route", async () => {
     const result = await executeCommand({
       decisionId: "decision_test",
       paymentId: "pay_test",
@@ -112,5 +131,16 @@ describe("KNOWN GAP: NETWORK_DEGRADATION selects a strategy the executor cannot 
     });
 
     expect(result).toEqual({ status: "rejected", reason: "unsupported_strategy" });
+  });
+
+  it("escalates rather than acting when no executable strategy is allowed at all", () => {
+    const trace = evaluateRecoveryDecision(
+      { ...failedPaymentContext("NETWORK_DEGRADATION", REPRESENTATIVE_AMOUNT), candidateStrategies: ["RETRY"] }
+    );
+
+    expect(trace.selectedAction).toBe("ESCALATE");
+    expect(trace.reason).toBe("no_executable_strategy");
+    expect(trace.selectedStrategy).toBeNull();
+    expect(buildExecutionCommand(trace)).toBeNull();
   });
 });

@@ -156,9 +156,10 @@ async function seedDecisionScenarios(merchantId: string, idPrefix: string, now: 
     });
 
     if (scenario.key === "act_retry_network") {
-      // No Razorpay-supported execution exists for RETRY (see
-      // executionService.ts - only PAYMENT_LINK/CAPTURE are executable).
-      // This payment resolves ON ITS OWN, unrelated to our decision -
+      // A retry scores highest here but cannot be executed, so the engine
+      // downgrades to PAYMENT_LINK (see executableStrategies.ts). This
+      // scenario deliberately leaves that decision unexecuted: the payment
+      // resolves ON ITS OWN, unrelated to our decision -
       // demonstrating NATURAL_RECOVERY attribution, distinct from an
       // intervention actually causing recovery.
       const recoveredAt = minutesAfter(decidedAt, 90);
