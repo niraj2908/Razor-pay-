@@ -33,7 +33,7 @@ export type ExecutionCommand = {
 // Phase 22 Step 1 finding: Razorpay has no "retry a failed payment" API.
 // RETRY and OTHER_ALLOWED_STRATEGY are therefore deliberately excluded -
 // only strategies with a real, verified Razorpay API action are here.
-const SUPPORTED_EXECUTION_STRATEGIES: readonly CommandStrategy[] = ["PAYMENT_LINK", "CAPTURE"];
+export const SUPPORTED_EXECUTION_STRATEGIES: readonly CommandStrategy[] = ["PAYMENT_LINK", "CAPTURE"];
 
 // A decision older than this is not trusted - the world may have changed
 // since it was made. Deliberately conservative for this first execution

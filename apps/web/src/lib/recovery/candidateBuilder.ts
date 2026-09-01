@@ -4,7 +4,8 @@ import { prisma } from "@/lib/db";
 import { evaluateRecoveryDecision } from "./decisionEngine";
 import { buildRecoveryAuditEvent } from "./audit";
 import { buildExecutionCommand, receiveExecutionCommand } from "./execution";
-import { FailureReason, PaymentMethod, PaymentState, RecoveryContext, Strategy } from "./types";
+import { PaymentMethod, PaymentState, RecoveryContext, Strategy } from "./types";
+import { mapRazorpayFailureToReason } from "./failureReasonMapping";
 import { isExecutionAllowed, resolveExperimentAssignment } from "@/lib/experiments/experimentService";
 
 export type CandidateBuildResult =
@@ -38,11 +39,15 @@ function mapStrategyToActionType(strategy: Strategy): ActionType {
 }
 
 /**
- * Payment doesn't yet store a structured failure reason (only
- * RazorpayPaymentStatus) or retry/contact history, so this defaults to the
- * most honest "we don't know yet" category rather than guessing. Once the
- * webhook route captures a real failure reason, this mapping is the only
- * place that needs to change.
+ * Diagnoses the payment from the failure signals Razorpay actually sent,
+ * which `paymentAssociation.ts` now copies onto the Payment row. A payment
+ * carrying no usable signal still diagnoses as STATE_UNCERTAIN - the same
+ * honest "we don't know yet" category this defaulted to unconditionally
+ * before the columns existed.
+ *
+ * Retry and contact history are still not tracked per payment, so those
+ * remain fixed here; they are the next thing this function should stop
+ * guessing about.
  */
 function contextFromPayment(payment: {
   id: string;
@@ -50,6 +55,10 @@ function contextFromPayment(payment: {
   amount: number;
   method: string | null;
   status: string;
+  errorCode: string | null;
+  errorReason: string | null;
+  errorSource: string | null;
+  errorStep: string | null;
 }): RecoveryContext {
   return {
     paymentId: payment.id,
@@ -57,7 +66,12 @@ function contextFromPayment(payment: {
     amount: payment.amount,
     paymentMethod: (payment.method as PaymentMethod | null) ?? "other",
     paymentState: mapPaymentStatus(payment.status),
-    failureReason: "STATE_UNCERTAIN" as FailureReason,
+    failureReason: mapRazorpayFailureToReason({
+      errorCode: payment.errorCode,
+      errorReason: payment.errorReason,
+      errorSource: payment.errorSource,
+      errorStep: payment.errorStep,
+    }),
     retryCount: 0,
     minutesSinceLastAttempt: 9999,
     customerContactCount: 0,
