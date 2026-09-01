@@ -12,6 +12,7 @@ import { DECISION_STATUS, EXECUTION_STATUS, OUTCOME_STATUS } from "@/lib/design/
 import { formatPercentOrUnavailable } from "@/lib/design/percent";
 import { humanizeEnumValue } from "@/lib/design/text";
 import { PendingIcon, ExecutionIcon, OutcomeIcon, AuditIcon, PaymentIcon, WalletIcon } from "@/lib/design/icons";
+import { ExecuteDecisionButton } from "./ExecuteDecisionButton";
 
 /**
  * Decision Detail - an investigation workbench (Phase 26, second visual
@@ -269,6 +270,14 @@ export default async function DecisionDetailPage({
                   value={decision.execution.completedAt ? <Timestamp iso={decision.execution.completedAt} className="text-fg text-sm" /> : "Not yet completed"}
                 />
               </dl>
+            ) : decision.decisionType === "ACT" && decision.chosenAction ? (
+              <div className="space-y-3">
+                <p className="text-fg-muted text-sm">
+                  This decision recommends {humanizeEnumValue(decision.chosenAction.actionType)} and has not been
+                  executed yet.
+                </p>
+                <ExecuteDecisionButton decisionId={decision.id} />
+              </div>
             ) : (
               <p className="text-fg-muted text-sm italic">No execution occurred for this decision.</p>
             )}
