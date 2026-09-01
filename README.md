@@ -52,8 +52,16 @@ is deliberately not printed in this repository.
    priority order — already succeeded, duplicate execution risk, retry limit,
    cooldown, amount ceiling, active incident — and an unsafe result can never be
    overridden into ACT.
-5. **Records why.** Every decision writes `DecisionEvidence` and audit events;
-   the Decision Detail page renders the reasoning the engine actually used.
+5. **Records why.** Each decision persists the inputs it was made from: a
+   `ModelPrediction` row per candidate strategy (predicted probability plus the
+   model version), a `CandidateAction` row per strategy (predicted success,
+   incremental lift, expected net value), the chosen action and expected
+   incremental value on the `Decision` itself, the natural-recovery probability
+   on the `RevenueRiskEvent`, and a `Decision` audit event whose `details` JSON
+   carries the policy version, model version, and the engine's reason code. The
+   Decision Detail page renders exactly those rows. The schema also defines a
+   `DecisionEvidence` table, but **no code path writes to it today and it is
+   empty** — the reasoning above is what actually backs the page.
 6. **Measures causality.** Randomized treatment/control assignment with 95%
    confidence intervals, where a result may only reach `VALID_EFFECT` under an
    explicitly configured minimum-effect threshold — natural recovery is never
