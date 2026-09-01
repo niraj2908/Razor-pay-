@@ -183,10 +183,25 @@ entity id — so the Audit page still scopes them per merchant.
 
 ### Cross-merchant totals
 
-Decision mix across all merchants: ACT 63, STOP 5, ESCALATE 4, WAIT 2.
-Executions: 26 `PAYMENT_LINK` succeeded, 2 failed — all against synthetic data.
-Payment events by type: `payment.failed` 39, `payment_link.paid` 24,
+These are **database-wide incidental sums** across every merchant in the shared
+instance — the Demo Workspace, the real Test Mode merchant, and whatever
+throwaway merchants an integration run happened to leave behind. They are *not*
+the Demo Workspace metrics a judge sees: those are the per-merchant figures in
+the table above, and no screen in the product displays these totals at all.
+They move whenever the demo is reseeded or a test suite cleans up after itself,
+so treat them as a snapshot rather than a fixture.
+
+Re-verified 2026-09-02:
+
+Decision mix across all merchants: ACT 56, STOP 4, WAIT 1, ESCALATE 2.
+Executions: 24 `PAYMENT_LINK` succeeded, 1 failed.
+Payment events by type: `payment.failed` 37, `payment_link.paid` 22,
 `payment.captured` 10, `order.paid` 2, `payment.authorized` 2.
+
+(The previous snapshot recorded on 1 September read ACT 63 / STOP 5 /
+ESCALATE 4 / WAIT 2, with 26 executions succeeded and 2 failed. The difference
+is the demo reset/reseed in §9 plus integration-test merchants removed by their
+own cleanup — not a data inconsistency.)
 
 ### Residual test merchants
 
