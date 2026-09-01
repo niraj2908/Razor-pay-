@@ -1,5 +1,7 @@
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ProcessTimeline, type TimelineNode } from "@/components/ui/ProcessTimeline";
+import { resolveRazorpayIntegrationStatus } from "@/lib/razorpay/connectionStatus";
+import { resolveRazorpayLifecycleVerification, type RazorpayLifecycleVerification } from "@/lib/razorpay/lifecycleVerification";
 import {
   SecurityIcon,
   AuthIcon,
@@ -15,6 +17,8 @@ import {
   EngineIcon,
   ExecutionIcon,
   OutcomeIcon,
+  ConnectedIcon,
+  PendingIcon,
 } from "@/lib/design/icons";
 
 /**
@@ -55,6 +59,8 @@ export default async function SecurityPolicyPage() {
           this page are implementation controls and alignment with applicable security principles, not a certification claim.
         </p>
       </section>
+
+      {await RazorpayIntegrationPanel()}
 
       <section className="flex flex-col gap-4">
         <h2 className="text-fg-muted text-[11px] font-medium tracking-wider uppercase">Security architecture</h2>
@@ -195,4 +201,128 @@ function PolicyCard({
       <p className="text-fg-secondary text-sm">{children}</p>
     </section>
   );
+}
+
+/**
+ * Razorpay integration status, for evaluators.
+ *
+ * Three facts that were previously collapsed into one badge and could be
+ * mistaken for each other:
+ *
+ *   1. DEPLOYMENT integration - is Razorpay Test Mode actually wired up
+ *      here? Derived purely from whether each variable is set, never a
+ *      hardcoded claim, and never reading a value into the page.
+ *   2. THIS WORKSPACE's binding - the synthetic Demo Workspace is
+ *      deliberately not the merchant bound to the Razorpay account, so its
+ *      honest state is "synthetic data", not "no integration".
+ *   3. LIVE E2E lifecycle - whether a real payment has actually travelled
+ *      the full path. This one cannot be derived from configuration, so it
+ *      is stated as a recorded verification result rather than rendered as
+ *      a live status, and it says plainly that it has NOT been completed.
+ */
+async function RazorpayIntegrationPanel() {
+  const integration = resolveRazorpayIntegrationStatus();
+  const lifecycle = await resolveRazorpayLifecycleVerification();
+
+  const rows: Array<{ label: string; state: "ok" | "pending"; detail: string }> = [
+    {
+      label: "Test Mode API credentials",
+      state: integration.apiCredentialsConfigured ? "ok" : "pending",
+      detail: integration.apiCredentialsConfigured
+        ? "A Test Mode key id and secret are configured for this deployment."
+        : "No Test Mode key id/secret is configured for this deployment.",
+    },
+    {
+      label: "Webhook signature verification",
+      state: integration.webhookSecretConfigured ? "ok" : "pending",
+      detail: integration.webhookSecretConfigured
+        ? "A webhook signing secret is configured. Every inbound webhook is HMAC-SHA256 verified with a constant-time comparison before it is read; unsigned and malformed requests are rejected."
+        : "No webhook signing secret is configured, so inbound webhooks cannot be verified and are rejected.",
+    },
+    {
+      label: "Bound merchant workspace",
+      state: integration.merchantBindingConfigured ? "ok" : "pending",
+      detail: integration.merchantBindingConfigured
+        ? "A dedicated Test Mode workspace is bound to the configured Razorpay account. It is kept separate from the Demo Workspace on purpose, so a real webhook can never resolve onto synthetic data."
+        : "No merchant is bound to a Razorpay account, so payment ingestion fails closed.",
+    },
+  ];
+
+  return (
+    <section className="border-border flex flex-col gap-4 rounded-lg border p-5">
+      <div className="flex items-center gap-2">
+        <span className="bg-info/10 text-info flex h-6 w-6 shrink-0 items-center justify-center rounded-sm">
+          <GatewayIcon aria-hidden="true" className="h-3.5 w-3.5" />
+        </span>
+        <h2 className="text-fg text-sm font-semibold">Razorpay Test Mode integration</h2>
+      </div>
+
+      <dl className="flex flex-col gap-3">
+        {rows.map((row) => (
+          <div key={row.label} className="flex gap-2.5">
+            {row.state === "ok" ? (
+              <ConnectedIcon aria-hidden="true" className="text-success mt-0.5 h-4 w-4 shrink-0" />
+            ) : (
+              <PendingIcon aria-hidden="true" className="text-fg-muted mt-0.5 h-4 w-4 shrink-0" />
+            )}
+            <div>
+              <dt className="text-fg text-sm font-medium">
+                {row.label} <span className="text-fg-muted font-normal">&middot; {row.state === "ok" ? "Configured" : "Not configured"}</span>
+              </dt>
+              <dd className="text-fg-secondary mt-0.5 text-sm">{row.detail}</dd>
+            </div>
+          </div>
+        ))}
+
+        <div className="border-border flex gap-2.5 border-t pt-3">
+          {lifecycle.decisionObserved ? (
+            <ConnectedIcon aria-hidden="true" className="text-success mt-0.5 h-4 w-4 shrink-0" />
+          ) : (
+            <PendingIcon aria-hidden="true" className="text-warning mt-0.5 h-4 w-4 shrink-0" />
+          )}
+          <div>
+            <dt className="text-fg text-sm font-medium">
+              Live end-to-end lifecycle{" "}
+              <span className="text-fg-muted font-normal">
+                &middot; {lifecycle.decisionObserved ? (lifecycle.executionObserved ? "Verified" : "Partially verified") : "Not verified"}
+              </span>
+            </dt>
+            <dd className="text-fg-secondary mt-0.5 text-sm">{lifecycleDetail(lifecycle)}</dd>
+          </div>
+        </div>
+      </dl>
+
+      <p className="text-fg-muted border-border border-t pt-3 text-xs">
+        The rows above are read from this deployment&apos;s own configuration at page load. API authentication was additionally
+        confirmed by hand against the live Razorpay API &mdash; a real Test Mode payment was fetched through the application&apos;s
+        own client &mdash; which is a recorded result, not a check re-run on every page view.
+      </p>
+    </section>
+  );
+}
+
+/**
+ * States exactly what the evidence supports and nothing beyond it. In
+ * particular it never describes the lifecycle as fully verified while the
+ * ACT/execution branch is unproven, and it names which decision branches the
+ * engine has actually produced from real payments rather than implying all
+ * of them.
+ */
+function lifecycleDetail(lifecycle: RazorpayLifecycleVerification): string {
+  if (!lifecycle.decisionObserved) {
+    return (
+      "No real Razorpay Test Mode payment has yet completed the chain on this deployment. Nothing on this page or " +
+      "anywhere in the application simulates one."
+    );
+  }
+  const branches = lifecycle.decisionTypes.join(", ");
+  const base =
+    `A real Razorpay Test Mode payment has been carried through webhook delivery, HMAC-SHA256 verification, payment-event ` +
+    `persistence, risk-event creation and the Decision Engine on this deployment. Decision branches actually produced from ` +
+    `real payments so far: ${branches}.` +
+    (lifecycle.outcomeObserved ? " Outcome attribution and audit records were written." : "");
+  return lifecycle.executionObserved
+    ? `${base} A recovery execution was also attempted against the live Razorpay API.`
+    : `${base} The ACT branch, which performs a recovery execution, has not yet been exercised end to end, so no execution ` +
+      `record exists from a real payment.`;
 }

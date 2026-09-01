@@ -33,6 +33,27 @@ export const NAV_ITEMS = [
   { href: "/security", label: "Security & Policies", icon: SecurityIcon },
 ] as const;
 
+/**
+ * The badge states what is true of THIS workspace without letting that be
+ * read as a statement about the project. "Not configured" alone said the
+ * former and implied the latter - a visitor in the synthetic Demo Workspace
+ * saw it and could reasonably conclude no Razorpay integration existed,
+ * when in fact it is implemented and configured for this deployment; the
+ * Demo is simply, deliberately, not the workspace bound to it.
+ */
+const RAZORPAY_BADGE: Record<RazorpayConnectionState["status"], { label: string; note: string | null }> = {
+  connected: { label: "Test Mode connected", note: null },
+  configured_other_workspace: {
+    label: "Test Mode configured",
+    // Deliberately workspace-NEUTRAL. This state covers the synthetic Demo
+    // Workspace and every self-signed-up merchant alike, so it must not
+    // describe the data as synthetic - that is true of the Demo only, and
+    // the Demo already says so in its own banner above every page.
+    note: "Bound to a separate workspace",
+  },
+  not_configured: { label: "Not configured", note: null },
+};
+
 export function Sidebar({
   operatorEmail,
   razorpayState = null,
@@ -99,14 +120,19 @@ export function Sidebar({
 
       <div className="border-border flex flex-col gap-1.5 border-t px-4 py-3">
         {razorpayState ? (
-          <span className="text-fg-muted flex items-center gap-1.5 text-[11px]">
-            {razorpayState.status === "connected" ? (
-              <ConnectedIcon aria-hidden="true" className="text-success h-3 w-3 shrink-0" />
-            ) : (
-              <PendingIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
-            )}
-            Razorpay: {razorpayState.status === "connected" ? "Connected" : "Not configured"}
-          </span>
+          <Link href="/security" className="flex flex-col gap-0.5 hover:underline">
+            <span className="text-fg-muted flex items-center gap-1.5 text-[11px]">
+              {razorpayState.status === "not_configured" ? (
+                <PendingIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
+              ) : (
+                <ConnectedIcon aria-hidden="true" className="text-success h-3 w-3 shrink-0" />
+              )}
+              Razorpay: {RAZORPAY_BADGE[razorpayState.status].label}
+            </span>
+            {RAZORPAY_BADGE[razorpayState.status].note ? (
+              <span className="text-fg-muted pl-[18px] text-[11px]">{RAZORPAY_BADGE[razorpayState.status].note}</span>
+            ) : null}
+          </Link>
         ) : null}
         <span className="text-fg-secondary truncate text-xs">{operatorEmail ?? "Not signed in"}</span>
         {operatorEmail ? <LogoutButton /> : null}
