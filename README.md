@@ -1,5 +1,14 @@
 # Revenue Recovery Intelligence
 
+<p>
+  <img alt="Next.js 16" src="https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white">
+  <img alt="PostgreSQL + Prisma" src="https://img.shields.io/badge/PostgreSQL-Prisma%205-2D3748?logo=prisma&logoColor=white">
+  <img alt="Razorpay Test Mode" src="https://img.shields.io/badge/Razorpay-Test%20Mode-0C2451?logo=razorpay&logoColor=white">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-671%20unit%20%2B%20145%20integration-2ea44f">
+  <img alt="Deployment" src="https://img.shields.io/badge/deploy-Vercel%20production-000000?logo=vercel&logoColor=white">
+</p>
+
 An economic decision layer for failed-payment recovery, built on Razorpay for
 the Razorpay AI Buildathon 2026 (Track 3 — AI Revenue Recovery).
 
@@ -12,6 +21,23 @@ Razorpay already knows how to retry a payment. The unanswered question is
 whether intervening on a specific payment creates revenue that would not have
 arrived anyway — and this system is built to answer that question, refuse to
 act when the answer is no, and prove the difference afterwards.
+
+
+**Contents** ·
+[Live deployment](#live-deployment) ·
+[What this system does](#what-this-system-does) ·
+[Architecture](#architecture) ·
+[Product tour](#product-tour) ·
+[Verified status](#verified-status-1-september-2026) ·
+[Real vs simulated](#what-is-real-vs-simulated) ·
+[Razorpay lifecycle evidence](#razorpay-lifecycle-evidence) ·
+[Executing a decision](#executing-a-decision) ·
+[Demo Workspace](#demo-workspace) ·
+[Repository layout](#repository-layout) ·
+[Setup](#setup) ·
+[Security posture](#security-posture) ·
+[Known limitations](#known-limitations) ·
+[Documentation](#documentation)
 
 ---
 
@@ -83,6 +109,284 @@ is deliberately not printed in this repository.
 8. **Explains, read-only.** The Assistant answers operational questions from the
    same authorized query services the pages use, and labels every figure as
    `observed`, `estimated`, `validated_causal`, or `none`.
+
+## Architecture
+
+### Stack
+
+| Layer | Technology |
+|---|---|
+| Application | Next.js 16 (App Router, React Server Components, Turbopack) |
+| Language | TypeScript, strict mode |
+| Database | PostgreSQL via Prisma 5 — 21 models, 12 migrations |
+| Payments | Razorpay Test Mode — webhooks in, REST API out |
+| Auth | Self-hosted operator sessions: `scrypt` password hashing, opaque server-side session tokens |
+| Tests | Vitest — 671 unit tests, 145 integration tests against a real database |
+| Build/CI | Turborepo + pnpm workspaces; Vercel production deploys track `main` |
+
+### System architecture
+
+```mermaid
+flowchart TB
+    RZP["Razorpay Test Mode"]
+
+    subgraph INGEST["Ingestion — apps/web/src/lib/webhooks"]
+        WH["POST /api/webhooks/razorpay"]
+        SIG["signature.ts<br/>timing-safe HMAC-SHA256"]
+        DEDUP["Dedupe on x-razorpay-event-id<br/>unique constraint"]
+        ASSOC["paymentAssociation.ts<br/>resolve merchant + payment,<br/>copy error_code / error_reason /<br/>error_source / error_step"]
+    end
+
+    subgraph DECIDE["Decision layer — apps/web/src/lib/recovery"]
+        MAP["failureReasonMapping.ts<br/>Razorpay signals to diagnosis"]
+        MODELS["naturalRecoveryModel.ts<br/>interventionResponseModel.ts<br/>cold-start baselines, versioned"]
+        ECON["economics.ts<br/>expected incremental value"]
+        SAFE["safetyGate.ts<br/>deterministic, cannot be overridden"]
+        POL["policy.ts<br/>policy-v1 limits"]
+        ENG["decisionEngine.ts<br/>ACT / WAIT / STOP / ESCALATE"]
+    end
+
+    subgraph EXEC["Execution — operator-approved only"]
+        API["POST /api/recovery/decisions/:id/execute"]
+        DES["decisionExecutionService.ts<br/>merchant-scoped, duplicate-safe"]
+        ES["executionService.ts<br/>Razorpay Payment Link"]
+    end
+
+    subgraph MEASURE["Measurement"]
+        OUT["outcomes/attributionEngine.ts<br/>natural vs intervention recovery"]
+        EXP["experiments/<br/>randomized assignment,<br/>95% CI, VALID_EFFECT gate"]
+        AUD["recovery/audit.ts<br/>append-only AuditEvent"]
+    end
+
+    UI["Operator console<br/>Overview · Recovery · Decision Detail ·<br/>Experiments · Reports · Audit · Assistant · Security"]
+    DB[("PostgreSQL<br/>Prisma, merchant-scoped queries")]
+
+    RZP -->|"payment.failed / payment.captured"| WH
+    WH --> SIG --> DEDUP --> QUEUE["processing/queue.ts<br/>in-process boundary via next/server after()<br/>webhook responds before any of this runs"]
+    QUEUE --> ASSOC --> MAP --> MODELS --> ECON --> ENG
+    SAFE --> ENG
+    POL --> ENG
+    ENG -->|"ACT, awaiting an operator"| UI
+    UI -->|"operator clicks Execute"| API --> DES --> ES -->|"Payment Link"| RZP
+    ES --> OUT
+    QUEUE --> OUT
+    OUT --> EXP
+    ENG --> AUD
+    ES --> AUD
+    OUT --> AUD
+    DECIDE --> DB
+    EXEC --> DB
+    MEASURE --> DB
+    DB --> UI
+```
+
+Nothing in that graph runs a language model. The Decision Engine is deterministic
+TypeScript; the Assistant sits beside it, read-only, and cannot write to any of it.
+
+### Request lifecycle — a failed payment, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Razorpay
+    participant W as Webhook route
+    participant Q as Processing boundary
+    participant E as Decision engine
+    participant D as PostgreSQL
+    participant O as Operator
+    participant X as Execution service
+
+    R->>W: payment.failed + X-Razorpay-Signature
+    W->>W: HMAC-SHA256 verify, constant time
+    W->>D: persist PaymentEvent, unique on event id
+    W-->>R: 200 OK, before any downstream work
+    W->>Q: enqueue, runs after the response
+    Q->>D: associate merchant + payment, copy error_* fields
+    Q->>E: build recovery candidate
+    E->>E: diagnose, score natural vs intervention recovery
+    E->>E: safety gate, then policy gate, then economics
+    E->>D: Decision + CandidateAction + ModelPrediction + AuditEvent
+    Note over E,O: Execution stops here. No autonomous action.
+    O->>X: Execute on an ACT decision, from Decision Detail
+    X->>D: re-check ownership, staleness, duplicate execution
+    X->>R: create Payment Link
+    R-->>X: plink_...
+    X->>D: Execution SUCCEEDED + audit events
+    R->>W: payment.captured, if the customer pays
+    W->>D: Outcome + attribution — incremental or natural
+```
+
+### Decision logic
+
+The engine prices every candidate strategy, then walks a fixed ladder. The first
+rule that matches wins, and the reason code it produces is stored on the decision.
+
+```mermaid
+flowchart TD
+    START["Recovery candidate"] --> PRICE["Price every strategy:<br/>amount × lift − cost − risk penalty"]
+    PRICE --> SAFETY{"Safety gate<br/>fixed priority order"}
+    SAFETY -->|"already succeeded /<br/>duplicate risk /<br/>retry limit"| STOP1["STOP<br/>safety_gate:..."]
+    SAFETY -->|"cooldown active"| WAIT1["WAIT<br/>safety_gate:cooldown_active"]
+    SAFETY -->|"amount ceiling /<br/>active incident"| ESC0["STOP or ESCALATE<br/>per gate fallback"]
+    SAFETY -->|"safe"| EXECUTABLE{"Any executable<br/>strategy left?"}
+    EXECUTABLE -->|"no"| ESC1["ESCALATE<br/>no_executable_strategy"]
+    EXECUTABLE -->|"yes"| POLICY{"Policy gate<br/>policy-v1"}
+    POLICY -->|"violated"| STOP2["STOP<br/>policy_violation:..."]
+    POLICY -->|"passed"| CONF{"Model confidence<br/>≥ 0.5?"}
+    CONF -->|"no"| ESC2["ESCALATE<br/>confidence_below_threshold"]
+    CONF -->|"yes"| NAT{"High natural recovery<br/>and no incremental value?"}
+    NAT -->|"yes"| WAIT2["WAIT<br/>high_natural_recovery_no_incremental_value"]
+    NAT -->|"no"| EV{"Expected incremental value"}
+    EV -->|"≥ ₹1 threshold"| ACT["ACT<br/>positive_expected_incremental_value"]
+    EV -->|"≤ 0"| STOP3["STOP<br/>non_positive_expected_incremental_value"]
+    EV -->|"between"| WAIT3["WAIT<br/>expected_value_below_action_threshold"]
+```
+
+An unsafe result can never be overridden into ACT, and the engine can only select
+a strategy the Execution Service can actually perform — so it can never decide on
+an action the product cannot carry out.
+
+### Data model
+
+The 21-model schema in full is documented in [docs/domain-model.md](docs/domain-model.md).
+These are the tables the recovery path writes on every event:
+
+```mermaid
+erDiagram
+    Merchant ||--o{ Payment : owns
+    Merchant ||--o{ RevenueRiskEvent : owns
+    Merchant ||--o{ Experiment : owns
+    Payment ||--o{ PaymentEvent : "raises"
+    Payment ||--o{ RevenueRiskEvent : "puts at risk"
+    RevenueRiskEvent ||--o{ Decision : "is decided by"
+    RevenueRiskEvent ||--o{ CandidateAction : "prices"
+    RevenueRiskEvent ||--o{ ModelPrediction : "is scored by"
+    Decision ||--o| Execution : "is executed as"
+    Decision ||--o{ AuditEvent : "records"
+    Execution ||--o| Outcome : "produces"
+    Experiment ||--o{ ExperimentAssignment : "assigns"
+    Experiment ||--o{ ExperimentMeasurementResult : "measures"
+    Operator ||--o{ OperatorSession : "authenticates"
+    Merchant ||--o{ Operator : "employs"
+```
+
+Every merchant-scoped query filters on `merchantId` in the database `WHERE`
+clause — never fetched broadly and filtered in application code — so another
+merchant's row is indistinguishable from a row that does not exist.
+
+---
+
+## Product tour
+
+Screenshots below are the live production deployment running against the Demo
+Workspace, which is seeded with clearly-synthetic data and labelled as such in
+the application itself. Open it yourself at
+[revenue-recovery-intelligence.vercel.app](https://revenue-recovery-intelligence.vercel.app)
+— **Explore the demo workspace** needs no account.
+
+### Sign in
+
+The entry point states what the product does before asking for anything. An
+evaluator can skip the form entirely and open the Demo Workspace in one click.
+
+![Login page](docs/screenshots/01-login.png)
+
+### Overview — where the money is right now
+
+Revenue at risk, recovery opportunity, and recovered GMV, plus the causal
+incremental figure from the completed experiment. The decision mix and outcome
+distribution show what the engine has actually been deciding, and the operational
+attention list is ranked by amount at risk so the largest exposures surface first.
+
+![Overview dashboard](docs/screenshots/02-overview.png)
+
+### Recovery queue — every at-risk payment and its verdict
+
+One row per revenue-risk event: the diagnosis the failure signals produced, the
+natural recovery probability, the amount at risk, the engine's decision, the
+recommended action, and its predicted success. Filterable by status and decision
+type.
+
+![Recovery queue](docs/screenshots/03-recovery-queue.png)
+
+### Decision detail — the full reasoning behind one call
+
+A lifecycle strip from payment to outcome, the expected incremental value, the
+recovery opportunity, the recommended action with its predicted success and cost,
+and the decision context — policy version, model version, and the reason code that
+produced the verdict. Model predictions are shown as advisory input only. On an
+un-executed ACT decision, this page carries the **Execute recovery** control; the
+same safety, policy, and experiment controls are re-checked server-side when it is
+pressed.
+
+![Decision detail](docs/screenshots/04-decision-detail.png)
+
+### Decision audit trail — what was recorded, in order
+
+The chronological record for a single decision: what was selected, under which
+policy and model version, and why. Written append-only as the decision is made.
+
+![Decision audit trail](docs/screenshots/05-decision-audit.png)
+
+### Experiments — recovery measured against a control arm
+
+Randomized treatment/control experiments and their measurement results. The list
+shows status and window; nothing here claims an effect on its own.
+
+![Experiments list](docs/screenshots/06-experiments.png)
+
+### Experiment detail — causal evidence, or none at all
+
+Treatment versus control with recovery rates, recovered GMV, and a 95% confidence
+interval on the observed difference — labelled as a raw sample statistic, not a
+causal claim. Beside it, the incremental recovered GMV is reported only once every
+validity check passes: arm balance, no duplicate assignments, no control
+contamination, no assignment-after-decision timing violations, minimum analyzable
+units per arm. A result reaches `VALID_EFFECT` only under an explicitly configured
+minimum-effect threshold, so natural recovery can never read as lift.
+
+![Experiment detail with statistical evidence](docs/screenshots/07-experiment-detail.png)
+
+### Reports — the operator's export
+
+Executive summary, payment activity by status and method, recovery performance
+split into natural versus intervention recovery, decision analysis, experiment
+evidence, and the audit methodology — over any date range, exportable as CSV or
+PDF.
+
+![Reports](docs/screenshots/08-reports.png)
+
+### Audit — every decision, execution, and outcome
+
+A merchant-wide chronological record. Each entry names the actor, the entity, and
+the versioned policy that governed it. Audit responses are built from an explicit
+per-entity field allowlist, so a field not on that list can never reach an API
+response.
+
+![Audit trail](docs/screenshots/09-audit.png)
+
+### AI Assistant — read-only, and honest about it
+
+Answers operational questions from the same authorized, merchant-scoped query
+services the pages use. Every figure is labelled `observed`, `estimated`,
+`validated_causal`, or `none`, and each answer names the query it was grounded in.
+It uses no generative language model: answers are composed by fixed deterministic
+logic, so it cannot invent a figure it does not have, and it cannot execute a
+payment, change a decision, or override the Decision Engine.
+
+![AI Assistant](docs/screenshots/10-assistant.png)
+
+### Security & Policies — the claims, and the limits
+
+Razorpay integration status read from this deployment's own configuration at page
+load, the security architecture end to end, and an explicit split between what is
+implemented, what is deliberately not, what is on the roadmap, and what is out of
+scope. It states plainly that alignment with a security principle is not
+certification against a standard.
+
+![Security and policies](docs/screenshots/11-security.png)
+
+---
 
 ## Verified status (1 September 2026)
 
