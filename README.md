@@ -128,55 +128,66 @@ is deliberately not printed in this repository.
 
 ```mermaid
 flowchart TB
-    RZP["Razorpay Test Mode"]
+    RZP_IN["Razorpay Test Mode<br/>payment.failed · payment.captured"]
 
-    subgraph INGEST["Ingestion — apps/web/src/lib/webhooks"]
+    subgraph INGEST["Ingestion — lib/webhooks, lib/processing"]
+        direction TB
         WH["POST /api/webhooks/razorpay"]
         SIG["signature.ts<br/>timing-safe HMAC-SHA256"]
-        DEDUP["Dedupe on x-razorpay-event-id<br/>unique constraint"]
-        ASSOC["paymentAssociation.ts<br/>resolve merchant + payment,<br/>copy error_code / error_reason /<br/>error_source / error_step"]
+        DEDUP["dedupe on x-razorpay-event-id<br/>unique constraint"]
+        QUEUE["processing/queue.ts<br/>in-process boundary via after&#40;&#41;<br/>the webhook has already responded"]
+        ASSOC["paymentAssociation.ts<br/>resolve merchant + payment,<br/>copy error_code · error_reason<br/>· error_source · error_step"]
+        WH --> SIG --> DEDUP --> QUEUE --> ASSOC
     end
 
-    subgraph DECIDE["Decision layer — apps/web/src/lib/recovery"]
+    subgraph DECIDE["Decision layer — lib/recovery"]
+        direction TB
         MAP["failureReasonMapping.ts<br/>Razorpay signals to diagnosis"]
         MODELS["naturalRecoveryModel.ts<br/>interventionResponseModel.ts<br/>cold-start baselines, versioned"]
         ECON["economics.ts<br/>expected incremental value"]
-        SAFE["safetyGate.ts<br/>deterministic, cannot be overridden"]
+        SAFE["safetyGate.ts<br/>deterministic, never overridable"]
         POL["policy.ts<br/>policy-v1 limits"]
-        ENG["decisionEngine.ts<br/>ACT / WAIT / STOP / ESCALATE"]
+        ENG["decisionEngine.ts<br/>ACT · WAIT · STOP · ESCALATE"]
+        MAP --> MODELS --> ECON --> ENG
+        SAFE --> ENG
+        POL --> ENG
     end
+
+    UI["Operator console<br/>Overview · Recovery · Decision Detail · Experiments<br/>Reports · Audit · Assistant · Security"]
 
     subgraph EXEC["Execution — operator-approved only"]
+        direction TB
         API["POST /api/recovery/decisions/:id/execute"]
-        DES["decisionExecutionService.ts<br/>merchant-scoped, duplicate-safe"]
-        ES["executionService.ts<br/>Razorpay Payment Link"]
+        DES["decisionExecutionService.ts<br/>merchant-scoped, stale-checked,<br/>duplicate-safe"]
+        ES["executionService.ts<br/>creates a Razorpay Payment Link"]
+        API --> DES --> ES
     end
 
+    RZP_OUT["Razorpay REST API<br/>plink_… created"]
+
     subgraph MEASURE["Measurement"]
+        direction TB
         OUT["outcomes/attributionEngine.ts<br/>natural vs intervention recovery"]
         EXP["experiments/<br/>randomized assignment,<br/>95% CI, VALID_EFFECT gate"]
         AUD["recovery/audit.ts<br/>append-only AuditEvent"]
+        OUT --> EXP
     end
 
-    UI["Operator console<br/>Overview · Recovery · Decision Detail ·<br/>Experiments · Reports · Audit · Assistant · Security"]
-    DB[("PostgreSQL<br/>Prisma, merchant-scoped queries")]
+    DB[("PostgreSQL · Prisma<br/>every query scoped by merchantId")]
 
-    RZP -->|"payment.failed / payment.captured"| WH
-    WH --> SIG --> DEDUP --> QUEUE["processing/queue.ts<br/>in-process boundary via next/server after()<br/>webhook responds before any of this runs"]
-    QUEUE --> ASSOC --> MAP --> MODELS --> ECON --> ENG
-    SAFE --> ENG
-    POL --> ENG
+    RZP_IN --> WH
+    ASSOC --> MAP
+    ASSOC --> OUT
     ENG -->|"ACT, awaiting an operator"| UI
-    UI -->|"operator clicks Execute"| API --> DES --> ES -->|"Payment Link"| RZP
+    UI -->|"operator clicks Execute"| API
+    ES --> RZP_OUT
     ES --> OUT
-    QUEUE --> OUT
-    OUT --> EXP
     ENG --> AUD
     ES --> AUD
     OUT --> AUD
-    DECIDE --> DB
-    EXEC --> DB
-    MEASURE --> DB
+    ENG --> DB
+    ES --> DB
+    AUD --> DB
     DB --> UI
 ```
 
